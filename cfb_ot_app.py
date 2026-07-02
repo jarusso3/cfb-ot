@@ -771,10 +771,14 @@ def render_sidebar() -> dict:
                     st.session_state.home_score += off
                     st.session_state.away_score += dfd
                 # Within-period scores for mid-period probability calc
-                st.session_state.period_first_pts  = off   # first possessor's points this period
-                st.session_state.period_second_pts = dfd   # second team's defensive points this period
+                st.session_state.period_first_pts  = off
+                st.session_state.period_second_pts = dfd
                 st.session_state.first_possession_logged = True
                 st.session_state.first_possession_key    = first_key
+                # Reset situation sliders to OT defaults for second team's possession
+                for k in ("field_position", "down_select", "distance_input"):
+                    if k in st.session_state:
+                        del st.session_state[k]
                 st.rerun()
 
         else:
@@ -817,6 +821,10 @@ def render_sidebar() -> dict:
                 st.session_state.first_possession_key    = None
                 st.session_state.period_first_pts        = 0
                 st.session_state.period_second_pts       = 0
+                # Reset situation sliders to OT defaults for next period
+                for k in ("field_position", "down_select", "distance_input"):
+                    if k in st.session_state:
+                        del st.session_state[k]
 
                 if st.session_state.away_score != st.session_state.home_score:
                     pass  # game over
@@ -880,22 +888,33 @@ def render_main(inputs: dict):
     away_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 + strength_delta * 0.1))
     home_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 - strength_delta * 0.1))
 
-    # Live distributions — use actual down/distance/field position from the sidebar.
-    # These drive the drive pie charts and current-period outcome display.
+    # Live distributions — use actual down/distance/field position for whichever team
+    # currently has the ball. The other team always uses OT defaults (their drive hasn't started).
     first_this_live = inputs["first_this"]
-    if not first_possession_logged and not is_shootout:
-        # First team hasn't possessed yet — use live situation for whoever is up
-        if first_this_live == "Away":
-            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
-            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
+    if not is_shootout:
+        if not first_possession_logged:
+            # First team is up — apply live situation to them
+            if first_this_live == "Away":
+                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
+            else:
+                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
+                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
         else:
-            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
-            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+            # Second team is up — apply live situation to them; first team is already collapsed
+            second_this_live = "Home" if first_this_live == "Away" else "Away"
+            if second_this_live == "Away":
+                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
+            else:
+                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
+                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
     else:
         away_probs_live = dict(away_probs_base)
         home_probs_live = dict(home_probs_base)
 
-    # Display distributions — collapsed to certainty once a team has possessed.
+    # Display distributions — collapsed to certainty once the first team has possessed.
+    # Second team's display uses the live situation above.
     away_probs = dict(away_probs_live)
     home_probs = dict(home_probs_live)
     if first_possession_logged and not is_shootout:
@@ -912,8 +931,10 @@ def render_main(inputs: dict):
     home_fg  = text_color(home_bg)
 
     # ── Game-win moneyline ──
+    # Use the display distributions (live/collapsed) so the moneyline reflects
+    # what we actually know about the current situation.
     gw = game_win_probs(
-        away_probs_base, home_probs_base,
+        away_probs, home_probs,
         away_succ, home_succ,
         ot_period, ot1_first,
         first_possession_logged,
