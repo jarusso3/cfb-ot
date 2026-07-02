@@ -749,67 +749,111 @@ def render_sidebar() -> dict:
         field_position = down = distance = None
 
     else:
+        # ── Which team has the ball right now ──
+        ball_team = first_name if not st.session_state.first_possession_logged else second_name
+        ball_side = first_this if not st.session_state.first_possession_logged else second_this
+        off_bg    = team_color(ball_team)
+        off_fg    = text_color(off_bg)
+
+        # ── Field position slider (0-40 yds from end zone) ──
+        prev_ytg = st.session_state.get("prev_ytg", 25)
         field_position = st.sidebar.slider(
-            "Field Position (yds from end zone)", 1, 99, 25, key="field_position",
+            "Field Position (yds from end zone)", 0, 40, 25, key="field_position",
         )
-        down     = st.sidebar.selectbox("Down", ["1st", "2nd", "3rd", "4th"], key="down_select")
-        distance = st.sidebar.number_input("Distance to go (yds)", 1, 99, 10, key="distance_input")
+        yards_gained = prev_ytg - field_position
+        st.session_state["prev_ytg"] = field_position
 
-        if not st.session_state.first_possession_logged:
-            first_outcome_label = st.sidebar.selectbox(
-                f"{first_name} (1st possession)", outcome_opts, key="first_outcome",
+        # Auto-advance down/distance based on movement
+        cur_down = st.session_state.get("cur_down", 1)
+        cur_dist = st.session_state.get("cur_dist", 10)
+        if yards_gained > 0:
+            if yards_gained >= cur_dist:
+                cur_down = 1
+                cur_dist = 10
+            else:
+                cur_down = min(cur_down + 1, 4)
+                cur_dist = cur_dist - yards_gained
+        st.session_state["cur_down"] = cur_down
+        st.session_state["cur_dist"] = cur_dist
+
+        # ── Down & Distance side by side ──
+        down_opts = ["1st", "2nd", "3rd", "4th"]
+        dc1, dc2 = st.sidebar.columns(2)
+        with dc1:
+            down = st.selectbox("Down", down_opts, index=cur_down - 1, key="down_select")
+        with dc2:
+            distance = st.number_input("Dist", min_value=1, max_value=40, value=int(cur_dist), key="distance_input")
+        # Keep session vars in sync if user manually overrides
+        st.session_state["cur_down"] = down_opts.index(down) + 1
+        st.session_state["cur_dist"] = int(distance)
+
+        # ── Show first team result if already logged ──
+        if st.session_state.first_possession_logged:
+            first_key_logged = st.session_state.first_possession_key
+            st.sidebar.markdown(
+                f"<div style='background:#1a1a1a;border-radius:6px;padding:5px 10px;"
+                f"font-size:0.8rem;color:#aaa;margin-bottom:4px;'>"
+                f"{first_name}: <strong style='color:#fff;'>{OUTCOME_LABELS[first_key_logged]}</strong> ✓"
+                f"</div>",
+                unsafe_allow_html=True,
             )
-            first_key = outcome_keys[outcome_opts.index(first_outcome_label)]
 
-            if st.sidebar.button(f"Log {first_name}", key="log_first_std", type="primary"):
-                off = OFFENSE_PTS[first_key]
-                dfd = DEFENSE_PTS[first_key]
+        # ── Label ──
+        st.sidebar.markdown(
+            f"<div style='font-size:0.8rem;color:#aaa;margin:6px 0 4px 0;'>"
+            f"<strong style='color:#fff;'>{ball_team}</strong> — log result:</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── TD / FG / TO buttons colored with the offensive team's color ──
+        st.sidebar.markdown(
+            f"<style>"
+            f".stSidebar div[data-testid='stHorizontalBlock'] button {{"
+            f"  background-color: {off_bg} !important;"
+            f"  color: {off_fg} !important;"
+            f"  border: none !important;"
+            f"  font-size: 1.5rem !important;"
+            f"  font-weight: 900 !important;"
+            f"  border-radius: 8px !important;"
+            f"  width: 100% !important;"
+            f"}}"
+            f"</style>",
+            unsafe_allow_html=True,
+        )
+
+        def _log_result(outcome_key):
+            off = OFFENSE_PTS[outcome_key]
+            dfd = DEFENSE_PTS[outcome_key]
+            reset_keys = ("field_position", "down_select", "distance_input", "prev_ytg", "cur_down", "cur_dist")
+            if not st.session_state.first_possession_logged:
                 if first_this == "Away":
                     st.session_state.away_score += off
                     st.session_state.home_score += dfd
                 else:
                     st.session_state.home_score += off
                     st.session_state.away_score += dfd
-                # Within-period scores for mid-period probability calc
-                st.session_state.period_first_pts  = off
-                st.session_state.period_second_pts = dfd
+                st.session_state.period_first_pts        = off
+                st.session_state.period_second_pts       = dfd
                 st.session_state.first_possession_logged = True
-                st.session_state.first_possession_key    = first_key
-                # Reset situation sliders to OT defaults for second team's possession
-                for k in ("field_position", "down_select", "distance_input"):
-                    if k in st.session_state:
-                        del st.session_state[k]
-                st.rerun()
-
-        else:
-            first_key = st.session_state.first_possession_key
-            st.sidebar.success(f"{first_name}: {OUTCOME_LABELS[first_key]} ✓")
-
-            second_outcome_label = st.sidebar.selectbox(
-                f"{second_name} (2nd possession)", outcome_opts, key="second_outcome",
-            )
-            second_key = outcome_keys[outcome_opts.index(second_outcome_label)]
-
-            if st.sidebar.button(f"Log {second_name}", key="log_second_std", type="primary"):
-                off = OFFENSE_PTS[second_key]
-                dfd = DEFENSE_PTS[second_key]
+                st.session_state.first_possession_key    = outcome_key
+                for k in reset_keys:
+                    if k in st.session_state: del st.session_state[k]
+            else:
+                first_key_l = st.session_state.first_possession_key
                 if second_this == "Away":
                     st.session_state.away_score += off
                     st.session_state.home_score += dfd
                 else:
                     st.session_state.home_score += off
                     st.session_state.away_score += dfd
-
-                # Record in history
                 if first_this == "Away":
-                    a_key, h_key = first_key, second_key
-                    a_pts = OFFENSE_PTS[first_key]  + DEFENSE_PTS[second_key]
-                    h_pts = OFFENSE_PTS[second_key] + DEFENSE_PTS[first_key]
+                    a_key, h_key = first_key_l, outcome_key
+                    a_pts = OFFENSE_PTS[first_key_l] + DEFENSE_PTS[outcome_key]
+                    h_pts = OFFENSE_PTS[outcome_key] + DEFENSE_PTS[first_key_l]
                 else:
-                    h_key, a_key = first_key, second_key
-                    h_pts = OFFENSE_PTS[first_key]  + DEFENSE_PTS[second_key]
-                    a_pts = OFFENSE_PTS[second_key] + DEFENSE_PTS[first_key]
-
+                    h_key, a_key = first_key_l, outcome_key
+                    h_pts = OFFENSE_PTS[first_key_l] + DEFENSE_PTS[outcome_key]
+                    a_pts = OFFENSE_PTS[outcome_key] + DEFENSE_PTS[first_key_l]
                 st.session_state.ot_history.append({
                     "period":       ot_period,
                     "away_outcome": a_key,
@@ -821,16 +865,24 @@ def render_sidebar() -> dict:
                 st.session_state.first_possession_key    = None
                 st.session_state.period_first_pts        = 0
                 st.session_state.period_second_pts       = 0
-                # Reset situation sliders to OT defaults for next period
-                for k in ("field_position", "down_select", "distance_input"):
-                    if k in st.session_state:
-                        del st.session_state[k]
-
+                for k in reset_keys:
+                    if k in st.session_state: del st.session_state[k]
                 if st.session_state.away_score != st.session_state.home_score:
-                    pass  # game over
+                    pass
                 else:
                     st.session_state.ot_period += 1
-                st.rerun()
+            st.rerun()
+
+        b1, b2, b3 = st.sidebar.columns(3)
+        with b1:
+            if st.button("TD", key="btn_td"):
+                _log_result("td_pat")
+        with b2:
+            if st.button("FG", key="btn_fg"):
+                _log_result("fg")
+        with b3:
+            if st.button("TO", key="btn_to"):
+                _log_result("turnover")
 
     # ── Reset ──
     if st.sidebar.button("Reset", type="secondary", key="reset_btn"):
@@ -838,6 +890,9 @@ def render_sidebar() -> dict:
             if k not in ("away_team", "home_team", "strength_delta",
                          "off_def_tendency", "ot1_first_radio"):
                 del st.session_state[k]
+        # Also clear situation state
+        for k in ("prev_ytg", "cur_down", "cur_dist"):
+            st.session_state.pop(k, None)
         st.rerun()
 
     return {
