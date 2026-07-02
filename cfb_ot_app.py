@@ -1,6 +1,9 @@
+import pickle
+import os
 import streamlit as st
 import altair as alt
 import pandas as pd
+import numpy as np
 
 # ── constants ──────────────────────────────────────────────────────────────────
 
@@ -266,27 +269,49 @@ def first_team_for_period(period: int, ot1_first: str) -> str:
     return "Home" if ot1_first == "Away" else "Away"
 
 
+# ── model loading ──────────────────────────────────────────────────────────────
+
+@st.cache_resource
+def load_model():
+    model_path = os.path.join(os.path.dirname(__file__), "cfb_ot_model.pkl")
+    with open(model_path, "rb") as f:
+        return pickle.load(f)
+
+
 # ── probability engine ─────────────────────────────────────────────────────────
 
-def base_drive_probs(strength_delta: float, off_def_tendency: float) -> dict:
+def base_drive_probs(strength_delta: float, off_def_tendency: float,
+                     down: int = 1, distance: int = 10, yards_to_goal: int = 25) -> dict:
     """
+    Returns a drive outcome probability distribution using the trained ML model
+    as the base, then applies strength and tendency adjustments on top.
+
     strength_delta  > 0 → this team's offense is stronger
     off_def_tendency > 0 → high-scoring game; < 0 → defensive game
+    down/distance/yards_to_goal → field situation (defaults to OT start)
     """
-    p = {"td_pat": 0.35, "td_2pt": 0.05, "td_6": 0.03,
-         "fg": 0.20, "turnover": 0.32, "def_td": 0.05}
+    payload = load_model()
+    model   = payload["model"]
+    classes = payload["classes"]   # e.g. ["fg", "td_pat", "turnover"]
+    def_td_base = payload.get("def_td_base_prob", 0.005)
+
+    # Query the model for the 3 trained outcomes
+    raw_probs = model.predict_proba([[down, distance, yards_to_goal]])[0]
+    p = {cls: prob for cls, prob in zip(classes, raw_probs)}
+
+    # Scale down by def_td_base to leave room, then add def_td back
+    scale = 1.0 - def_td_base
+    p = {k: v * scale for k, v in p.items()}
+    p["def_td"] = def_td_base
+
+    # td_2pt and td_6 aren't modeled — split a small portion from td_pat
+    td_total = p.get("td_pat", 0)
+    p["td_pat"] = td_total * 0.87
+    p["td_2pt"] = td_total * 0.08
+    p["td_6"]   = td_total * 0.05
+
+    # Apply strength adjustment (positive = this team favored)
     td_keys = ["td_pat", "td_2pt", "td_6"]
-
-    if off_def_tendency > 0:
-        for k in td_keys:
-            p[k] *= (1 + off_def_tendency * 0.4)
-        p["turnover"] *= (1 - off_def_tendency * 0.3)
-    elif off_def_tendency < 0:
-        for k in td_keys:
-            p[k] *= (1 + off_def_tendency * 0.3)
-        p["fg"]       *= (1 - off_def_tendency * 0.2)
-        p["turnover"] *= (1 - off_def_tendency * 0.4)
-
     if strength_delta > 0:
         for k in td_keys:
             p[k] *= (1 + strength_delta * 0.5)
@@ -298,6 +323,17 @@ def base_drive_probs(strength_delta: float, off_def_tendency: float) -> dict:
             p[k] /= (1 + d * 0.5)
         p["turnover"] *= (1 + d * 0.3)
         p["fg"]       *= (1 + d * 0.3)
+
+    # Apply off/def tendency (affects both teams equally — done at call site)
+    if off_def_tendency > 0:
+        for k in td_keys:
+            p[k] *= (1 + off_def_tendency * 0.4)
+        p["turnover"] *= (1 - off_def_tendency * 0.3)
+    elif off_def_tendency < 0:
+        for k in td_keys:
+            p[k] *= (1 + off_def_tendency * 0.3)
+        p["fg"]       *= (1 - off_def_tendency * 0.2)
+        p["turnover"] *= (1 - off_def_tendency * 0.4)
 
     total = sum(p.values())
     return {k: v / total for k, v in p.items()}
@@ -813,6 +849,8 @@ def render_sidebar() -> dict:
         "field_position":           field_position if not is_shootout else None,
         "down":                     down           if not is_shootout else None,
         "distance":                 distance       if not is_shootout else None,
+        "down_int":                 {"1st": 1, "2nd": 2, "3rd": 3, "4th": 4}.get(down, 1) if not is_shootout else 1,
+        "distance_int":             int(distance)  if not is_shootout and distance else 10,
     }
 
 
@@ -830,16 +868,36 @@ def render_main(inputs: dict):
     ot1_first              = inputs["ot1_first"]
     first_possession_logged = inputs["first_possession_logged"]
 
-    # Base distributions — used for all forward-looking probability math (game win, future periods).
-    away_probs_base = base_drive_probs( strength_delta, off_def_tendency)
-    home_probs_base = base_drive_probs(-strength_delta, off_def_tendency)
+    # Live situation from sidebar (default to OT start if not set)
+    live_down       = inputs.get("down_int", 1)
+    live_distance   = inputs.get("distance_int", 10)
+    live_ytg        = inputs.get("field_position", 25) if inputs.get("field_position") else 25
+
+    # Base distributions — OT start defaults (1st & 10 from 25).
+    # Used for all forward-looking math (game win, future periods, game length table).
+    away_probs_base = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
+    home_probs_base = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
     away_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 + strength_delta * 0.1))
     home_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 - strength_delta * 0.1))
 
+    # Live distributions — use actual down/distance/field position from the sidebar.
+    # These drive the drive pie charts and current-period outcome display.
+    first_this_live = inputs["first_this"]
+    if not first_possession_logged and not is_shootout:
+        # First team hasn't possessed yet — use live situation for whoever is up
+        if first_this_live == "Away":
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
+        else:
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+    else:
+        away_probs_live = dict(away_probs_base)
+        home_probs_live = dict(home_probs_base)
+
     # Display distributions — collapsed to certainty once a team has possessed.
-    # Used only for charts and the current-period outcome display (always paired with 0,0 start scores).
-    away_probs = dict(away_probs_base)
-    home_probs = dict(home_probs_base)
+    away_probs = dict(away_probs_live)
+    home_probs = dict(home_probs_live)
     if first_possession_logged and not is_shootout:
         first_key = st.session_state.first_possession_key
         collapsed = {k: (1.0 if k == first_key else 0.0) for k in OUTCOME_LABELS}
