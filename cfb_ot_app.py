@@ -584,27 +584,54 @@ def init_state():
 # ── sidebar ────────────────────────────────────────────────────────────────────
 
 def render_sidebar() -> dict:
-    st.sidebar.title("CFB OT Pricer")
 
-    # ── Teams ──
-    st.sidebar.header("Teams")
-    t1, t2 = st.sidebar.columns(2)
-    with t1:
-        away_team = st.selectbox("Away", FBS_TEAMS, index=FBS_TEAMS.index("Alabama"), key="away_team")
-    with t2:
-        home_team = st.selectbox("Home", FBS_TEAMS, index=FBS_TEAMS.index("Georgia"), key="home_team")
+    # ── Game Setup (collapsible) ──
+    with st.sidebar.expander("Game Setup", expanded=not bool(st.session_state.get("ot_history")) and not st.session_state.get("first_possession_logged")):
+        t1, t2 = st.columns(2)
+        with t1:
+            away_team = st.selectbox("Away", FBS_TEAMS, index=FBS_TEAMS.index("Alabama"), key="away_team")
+        with t2:
+            home_team = st.selectbox("Home", FBS_TEAMS, index=FBS_TEAMS.index("Georgia"), key="home_team")
 
-    # ── Strength sliders ──
-    st.sidebar.header("Team Strength")
+        reg_score = st.number_input(
+            "Tied score entering OT", min_value=0, max_value=999, step=1,
+            key="reg_score",
+        )
+        if not st.session_state.ot_history and not st.session_state.first_possession_logged:
+            st.session_state.away_score = reg_score
+            st.session_state.home_score = reg_score
+
+        ot1_first = st.radio(
+            "Who goes first in OT 1?", ["Away", "Home"],
+            index=0 if st.session_state.ot1_first == "Away" else 1,
+            horizontal=True, key="ot1_first_radio",
+        )
+        st.session_state.ot1_first = ot1_first
+
+        ot_period = st.session_state.ot_period
+        seq = []
+        for p in range(ot_period, ot_period + 4):
+            f = first_team_for_period(p, ot1_first)
+            fn = away_team if f == "Away" else home_team
+            sn = home_team if f == "Away" else away_team
+            line = f"**OT {p}:** {fn} → {sn}"
+            if p == ot_period:
+                line += " ← now"
+            seq.append(line)
+        st.caption("  \n".join(seq))
+
+    # Read team names back from session state if expander was collapsed
+    away_team = st.session_state.get("away_team", FBS_TEAMS[0])
+    home_team = st.session_state.get("home_team", FBS_TEAMS[0])
+    ot1_first = st.session_state.get("ot1_first", "Away")
+    ot_period = st.session_state.ot_period
+
+    # ── Strength sliders (always visible) ──
+    st.sidebar.markdown("**Team Strength**")
     raw_strength = st.sidebar.slider(
         "Overall Strength", -1.0, 1.0, 0.0, 0.05, key="strength_delta",
-        help=(
-            "Which team has the offensive edge. "
-            "Negative = Away favored; positive = Home favored."
-        ),
+        help="Negative = Away favored; positive = Home favored.",
     )
-    # Internally, strength_delta > 0 means Away is favored (base_drive_probs convention).
-    # Flip the slider so the UI is intuitive: left = Away favored, right = Home favored.
     strength_delta = -raw_strength
     if raw_strength < -0.02:
         fav_label = f"{away_team} +{abs(raw_strength):.2f}"
@@ -612,16 +639,11 @@ def render_sidebar() -> dict:
         fav_label = f"{home_team} +{raw_strength:.2f}"
     else:
         fav_label = "Even"
-    st.sidebar.caption(f"Favored offense: **{fav_label}**")
+    st.sidebar.caption(f"Favored: **{fav_label}**")
 
     off_def_tendency = st.sidebar.slider(
         "Off / Def Tendency", -1.0, 1.0, 0.0, 0.05, key="off_def_tendency",
-        help=(
-            "Overall scoring environment, applied to BOTH teams. "
-            "Positive = offensive game (more TDs, fewer turnovers for everyone). "
-            "Negative = defensive game (fewer TDs, more FGs and turnovers for everyone). "
-            "Independent of which team is favored."
-        ),
+        help="Positive = offensive game; negative = defensive game.",
     )
     if off_def_tendency < -0.05:
         tend_label = f"Defensive ({off_def_tendency:+.2f})"
@@ -629,70 +651,15 @@ def render_sidebar() -> dict:
         tend_label = f"Offensive ({off_def_tendency:+.2f})"
     else:
         tend_label = "Neutral"
-    st.sidebar.caption(f"Game environment: **{tend_label}**")
+    st.sidebar.caption(f"Environment: **{tend_label}**")
 
-    # ── Score ──
-    # One widget: reg_score (Streamlit owns this key, we never write to it).
-    # Two plain session state vars: away_score / home_score (no widget owns them,
-    # so button callbacks can freely modify them).
-    # While no OT scoring has happened, both track reg_score.
-    # Once OT points accumulate they diverge from reg_score independently.
-    st.sidebar.header("Score after regulation")
-    reg_score = st.sidebar.number_input(
-        "Tied score entering OT", min_value=0, max_value=999, step=1,
-        key="reg_score",
-    )
-    # Only sync reg_score → canonical when no OT scoring has occurred yet
-    if not st.session_state.ot_history and not st.session_state.first_possession_logged:
-        st.session_state.away_score = reg_score
-        st.session_state.home_score = reg_score
-    # Always show current live score
-    st.sidebar.caption(
-        f"Live score: **{away_team} {st.session_state.away_score} – "
-        f"{st.session_state.home_score} {home_team}**"
-    )
-
-    # ── OT History ──
-    if st.session_state.ot_history:
-        st.sidebar.header("OT History")
-        rows = []
-        for entry in st.session_state.ot_history:
-            p = entry["period"]
-            a_val = str(entry.get("away_pts", "—"))
-            h_val = str(entry.get("home_pts", "—"))
-            rows.append({"OT": f"OT {p}", away_team: a_val, home_team: h_val})
-        st.sidebar.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-    # ── Possession Order ──
-    st.sidebar.header("Possession Order")
-    ot1_first = st.sidebar.radio(
-        "Who goes first in OT 1?", ["Away", "Home"],
-        index=0 if st.session_state.ot1_first == "Away" else 1,
-        horizontal=True, key="ot1_first_radio",
-    )
-    st.session_state.ot1_first = ot1_first
-
-    # Show possession order for next 4 periods
-    ot_period = st.session_state.ot_period
-    seq = []
-    for p in range(ot_period, ot_period + 4):
-        f = first_team_for_period(p, ot1_first)
-        fn = away_team if f == "Away" else home_team
-        sn = home_team if f == "Away" else away_team
-        line = f"**OT {p}:** {fn} → {sn}"
-        if p == ot_period:
-            line += " ← now"
-        seq.append(line)
-    st.sidebar.caption("  \n".join(seq))
-
-    # ── Current Situation ──
     is_shootout = ot_period >= 3
     first_this  = first_team_for_period(ot_period, ot1_first)
     second_this = "Home" if first_this == "Away" else "Away"
     first_name  = away_team if first_this == "Away" else home_team
     second_name = home_team if first_this == "Away" else away_team
 
-    st.sidebar.header(f"OT {ot_period} — Log Results")
+    st.sidebar.markdown(f"**OT {ot_period} — Log Results**")
 
     outcome_opts = list(OUTCOME_LABELS.values())
     outcome_keys = list(OUTCOME_LABELS.keys())
@@ -890,10 +857,20 @@ def render_sidebar() -> dict:
             if k not in ("away_team", "home_team", "strength_delta",
                          "off_def_tendency", "ot1_first_radio"):
                 del st.session_state[k]
-        # Also clear situation state
         for k in ("prev_ytg", "cur_down", "cur_dist"):
             st.session_state.pop(k, None)
         st.rerun()
+
+    # ── OT History (bottom) ──
+    if st.session_state.ot_history:
+        st.sidebar.markdown("**OT History**")
+        rows = []
+        for entry in st.session_state.ot_history:
+            p = entry["period"]
+            a_val = str(entry.get("away_pts", "—"))
+            h_val = str(entry.get("home_pts", "—"))
+            rows.append({"OT": f"OT {p}", away_team: a_val, home_team: h_val})
+        st.sidebar.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
     return {
         "away_team":                away_team,
