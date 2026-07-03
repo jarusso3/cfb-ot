@@ -725,7 +725,10 @@ def render_sidebar() -> dict:
             st.rerun()
 
         st.sidebar.markdown(
-            f"<style>button[aria-label='✓ Success']{{background:{off_bg}!important;color:{off_fg}!important;border:none!important;}}</style>",
+            f"<style>.stSidebar div[data-testid='stHorizontalBlock'] button:nth-of-type(1){{"
+            f"background:{off_bg}!important;color:{off_fg}!important;border:none!important;"
+            f"font-size:1.1rem!important;font-weight:800!important;border-radius:8px!important}}"
+            f"</style>",
             unsafe_allow_html=True,
         )
         sb1, sb2 = st.sidebar.columns(2)
@@ -847,6 +850,18 @@ def render_sidebar() -> dict:
                     st.session_state.ot_period += 1
             st.rerun()
 
+        btn_css = (
+            f"<style>.stSidebar div[data-testid='stHorizontalBlock'] button:nth-of-type(1){{"
+            f"background:#1B5E20!important;color:#fff!important;border:none!important;"
+            f"font-size:1.5rem!important;font-weight:900!important;border-radius:8px!important}}"
+            f".stSidebar div[data-testid='stHorizontalBlock'] button:nth-of-type(2){{"
+            f"background:#0D47A1!important;color:#fff!important;border:none!important;"
+            f"font-size:1.5rem!important;font-weight:900!important;border-radius:8px!important}}"
+            f".stSidebar div[data-testid='stHorizontalBlock'] button:nth-of-type(3){{"
+            f"font-size:1.5rem!important;font-weight:900!important;border-radius:8px!important}}"
+            f"</style>"
+        )
+        st.sidebar.markdown(btn_css, unsafe_allow_html=True)
         b1, b2, b3 = st.sidebar.columns(3)
         with b1:
             if st.button("TD", key="btn_td", use_container_width=True):
@@ -858,6 +873,13 @@ def render_sidebar() -> dict:
             if st.button("TO", key="btn_to", use_container_width=True):
                 _log_result("turnover")
 
+    # Full Reset
+    st.sidebar.markdown(
+        "<style>.stSidebar div[data-testid='stBaseButton-secondary']{{"
+        "background:#F9A825!important;color:#111!important;border:none!important;font-weight:700!important}}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
     if st.sidebar.button("⚠️ Full Reset", type="secondary", key="reset_btn", use_container_width=True):
         for k in list(st.session_state.keys()):
             if k not in ("away_team", "home_team", "strength_delta",
@@ -1225,17 +1247,6 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    # Global button color overrides — target by aria-label (stable in Streamlit 1.57)
-    st.markdown("""
-    <style>
-    button[aria-label="TD"]   { background:#1B5E20 !important; color:#fff !important; font-size:1.4rem !important; font-weight:900 !important; border:none !important; }
-    button[aria-label="FG"]   { background:#0D47A1 !important; color:#fff !important; font-size:1.4rem !important; font-weight:900 !important; border:none !important; }
-    button[aria-label="TO"]   { font-size:1.4rem !important; font-weight:900 !important; }
-    button[aria-label="⚠️ Full Reset"] { background:#F9A825 !important; color:#111 !important; font-weight:700 !important; border:none !important; }
-    button[aria-label="✓ Success"] { font-weight:800 !important; }
-    button[aria-label="✗ Failure"] { font-weight:800 !important; }
-    </style>
-    """, unsafe_allow_html=True)
     init_state()
     inputs = render_sidebar()
     render_main(inputs)
