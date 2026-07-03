@@ -807,17 +807,24 @@ def render_sidebar() -> dict:
             unsafe_allow_html=True,
         )
 
-        # ── TD / FG / TO buttons colored with the offensive team's color ──
+        # ── TD / FG / TO buttons — each with its own outcome color ──
+        # TD = green (scoring), FG = blue (scoring but less), TO = red (negative)
         st.sidebar.markdown(
             f"<style>"
-            f".stSidebar div[data-testid='stHorizontalBlock'] button {{"
-            f"  background-color: {off_bg} !important;"
-            f"  color: {off_fg} !important;"
-            f"  border: none !important;"
-            f"  font-size: 1.5rem !important;"
-            f"  font-weight: 900 !important;"
-            f"  border-radius: 8px !important;"
-            f"  width: 100% !important;"
+            f"div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:nth-child(1) {{"
+            f"  background-color: #1B5E20 !important; color: #fff !important;"
+            f"  border: none !important; font-size:1.5rem !important; font-weight:900 !important;"
+            f"  border-radius:8px !important; width:100% !important;"
+            f"}}"
+            f"div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:nth-child(2) {{"
+            f"  background-color: #0D47A1 !important; color: #fff !important;"
+            f"  border: none !important; font-size:1.5rem !important; font-weight:900 !important;"
+            f"  border-radius:8px !important; width:100% !important;"
+            f"}}"
+            f"div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:nth-child(3) {{"
+            f"  background-color: #B71C1C !important; color: #fff !important;"
+            f"  border: none !important; font-size:1.5rem !important; font-weight:900 !important;"
+            f"  border-radius:8px !important; width:100% !important;"
             f"}}"
             f"</style>",
             unsafe_allow_html=True,
@@ -886,8 +893,15 @@ def render_sidebar() -> dict:
             if st.button("TO", key="btn_to"):
                 _log_result("turnover")
 
-    # ── Reset ──
-    if st.sidebar.button("Reset", type="secondary", key="reset_btn"):
+    # ── Full Reset ──
+    st.sidebar.markdown(
+        "<style>div[data-testid='stSidebar'] [data-testid='stBaseButton-secondary'] {"
+        "  background-color: #F9A825 !important; color: #111 !important;"
+        "  border: none !important; font-weight: 700 !important;"
+        "}</style>",
+        unsafe_allow_html=True,
+    )
+    if st.sidebar.button("Full Reset", type="secondary", key="reset_btn"):
         for k in list(st.session_state.keys()):
             if k not in ("away_team", "home_team", "strength_delta",
                          "off_def_tendency", "ot1_first_radio"):
