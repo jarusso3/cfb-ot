@@ -724,23 +724,16 @@ def render_sidebar() -> dict:
                     st.session_state.ot_period += 1
             st.rerun()
 
-        # Success = team color. Failure = default (untouched).
         st.sidebar.markdown(
-            f"<style>"
-            f"div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:first-child {{"
-            f"  background-color: {off_bg} !important; color: {off_fg} !important;"
-            f"  border: none !important; font-size:1.1rem !important; font-weight:800 !important;"
-            f"  border-radius:8px !important; width:100% !important;"
-            f"}}"
-            f"</style>",
+            f"<style>button[aria-label='✓ Success']{{background:{off_bg}!important;color:{off_fg}!important;border:none!important;}}</style>",
             unsafe_allow_html=True,
         )
         sb1, sb2 = st.sidebar.columns(2)
         with sb1:
-            if st.button("Success", key="btn_success"):
+            if st.button("✓ Success", key="btn_success", use_container_width=True):
                 _log_shootout("Success")
         with sb2:
-            if st.button("Failure", key="btn_failure"):
+            if st.button("✗ Failure", key="btn_failure", use_container_width=True):
                 _log_shootout("Failure")
 
         field_position = down = distance = None
@@ -802,23 +795,6 @@ def render_sidebar() -> dict:
             unsafe_allow_html=True,
         )
 
-        # TD = green, FG = blue, TO = default white
-        st.sidebar.markdown(
-            "<style>"
-            "div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:nth-child(1) {"
-            "  background-color: #1B5E20 !important; color: #fff !important;"
-            "  border: none !important; font-size:1.5rem !important; font-weight:900 !important;"
-            "  border-radius:8px !important; width:100% !important;"
-            "}"
-            "div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:nth-child(2) {"
-            "  background-color: #0D47A1 !important; color: #fff !important;"
-            "  border: none !important; font-size:1.5rem !important; font-weight:900 !important;"
-            "  border-radius:8px !important; width:100% !important;"
-            "}"
-            "</style>",
-            unsafe_allow_html=True,
-        )
-
         def _log_result(outcome_key):
             off = OFFENSE_PTS[outcome_key]
             dfd = DEFENSE_PTS[outcome_key]
@@ -873,29 +849,16 @@ def render_sidebar() -> dict:
 
         b1, b2, b3 = st.sidebar.columns(3)
         with b1:
-            if st.button("TD", key="btn_td"):
+            if st.button("TD", key="btn_td", use_container_width=True):
                 _log_result("td_pat")
         with b2:
-            if st.button("FG", key="btn_fg"):
+            if st.button("FG", key="btn_fg", use_container_width=True):
                 _log_result("fg")
         with b3:
-            if st.button("TO", key="btn_to"):
+            if st.button("TO", key="btn_to", use_container_width=True):
                 _log_result("turnover")
 
-    # ── Full Reset ──
-    st.sidebar.markdown(
-        "<style>"
-        "div[data-testid='stSidebar'] button[kind='secondary'] {"
-        "  background-color: #F9A825 !important; color: #111 !important;"
-        "  border: none !important; font-weight: 700 !important;"
-        "}"
-        "div[data-testid='stSidebar'] button[kind='secondary']:hover {"
-        "  background-color: #F57F17 !important; color: #111 !important;"
-        "}"
-        "</style>",
-        unsafe_allow_html=True,
-    )
-    if st.sidebar.button("Full Reset", type="secondary", key="reset_btn"):
+    if st.sidebar.button("⚠️ Full Reset", type="secondary", key="reset_btn", use_container_width=True):
         for k in list(st.session_state.keys()):
             if k not in ("away_team", "home_team", "strength_delta",
                          "off_def_tendency", "ot1_first_radio"):
@@ -1262,6 +1225,17 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded",
     )
+    # Global button color overrides — target by aria-label (stable in Streamlit 1.57)
+    st.markdown("""
+    <style>
+    button[aria-label="TD"]   { background:#1B5E20 !important; color:#fff !important; font-size:1.4rem !important; font-weight:900 !important; border:none !important; }
+    button[aria-label="FG"]   { background:#0D47A1 !important; color:#fff !important; font-size:1.4rem !important; font-weight:900 !important; border:none !important; }
+    button[aria-label="TO"]   { font-size:1.4rem !important; font-weight:900 !important; }
+    button[aria-label="⚠️ Full Reset"] { background:#F9A825 !important; color:#111 !important; font-weight:700 !important; border:none !important; }
+    button[aria-label="✓ Success"] { font-weight:800 !important; }
+    button[aria-label="✗ Failure"] { font-weight:800 !important; }
+    </style>
+    """, unsafe_allow_html=True)
     init_state()
     inputs = render_sidebar()
     render_main(inputs)
