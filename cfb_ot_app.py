@@ -665,53 +665,88 @@ def render_sidebar() -> dict:
     outcome_keys = list(OUTCOME_LABELS.keys())
 
     if is_shootout:
-        st.sidebar.info("2-pt Conversion Shootout (from the 3-yd line)")
+        st.sidebar.caption("2-pt Conversion Shootout — from the 3-yd line")
 
-        first_2pt = st.sidebar.radio(
-            f"{first_name} (1st) — 2-pt attempt", ["Success", "Failure"],
-            horizontal=True, key="first_2pt",
-        )
-        if st.sidebar.button(f"Log {first_name}", key="log_first_shootout", type="primary"):
-            pts = 2 if first_2pt == "Success" else 0
-            if first_this == "Away":
-                st.session_state.away_score += pts
-            else:
-                st.session_state.home_score += pts
-
-            st.session_state.first_possession_logged = True
-            st.session_state.first_possession_key    = first_2pt
-            st.rerun()
-
+        # Show first team's result as a badge if already logged, then show second team's buttons
         if st.session_state.first_possession_logged:
-            first_result = st.session_state.first_possession_key
-            st.sidebar.success(f"{first_name}: {first_result} ✓")
-            second_2pt = st.sidebar.radio(
-                f"{second_name} (2nd) — 2-pt attempt", ["Success", "Failure"],
-                horizontal=True, key="second_2pt",
+            first_result = st.session_state.first_possession_key  # "Success" or "Failure"
+            st.sidebar.markdown(
+                f"<div style='background:#1a1a1a;border-radius:6px;padding:5px 10px;"
+                f"font-size:0.8rem;color:#aaa;margin-bottom:6px;'>"
+                f"{first_name}: <strong style='color:#fff;'>{first_result} ✓</strong>"
+                f"</div>",
+                unsafe_allow_html=True,
             )
-            if st.sidebar.button(f"Log {second_name}", key="log_second_shootout", type="primary"):
-                pts = 2 if second_2pt == "Success" else 0
+            ball_name = second_name
+            ball_side = second_this
+        else:
+            ball_name = first_name
+            ball_side = first_this
+
+        off_bg = team_color(ball_name)
+        off_fg = text_color(off_bg)
+
+        st.sidebar.markdown(
+            f"<div style='font-size:0.8rem;color:#aaa;margin-bottom:4px;'>"
+            f"<strong style='color:#fff;'>{ball_name}</strong> — 2-pt attempt:</div>",
+            unsafe_allow_html=True,
+        )
+
+        def _log_shootout(result: str):
+            pts = 2 if result == "Success" else 0
+            if not st.session_state.first_possession_logged:
+                if first_this == "Away":
+                    st.session_state.away_score += pts
+                else:
+                    st.session_state.home_score += pts
+                st.session_state.first_possession_logged = True
+                st.session_state.first_possession_key    = result
+            else:
+                first_result_key = st.session_state.first_possession_key
                 if second_this == "Away":
                     st.session_state.away_score += pts
                 else:
                     st.session_state.home_score += pts
-
-                a_succ = (first_2pt   == "Success") if first_this  == "Away" else (second_2pt == "Success")
-                h_succ = (first_2pt   == "Success") if first_this  == "Home" else (second_2pt == "Success")
+                a_succ = (first_result_key == "Success") if first_this == "Away" else (result == "Success")
+                h_succ = (first_result_key == "Success") if first_this == "Home" else (result == "Success")
                 st.session_state.ot_history.append({
-                    "period": ot_period,
-                    "away_pts": 2 if a_succ else 0,
-                    "home_pts": 2 if h_succ else 0,
+                    "period":       ot_period,
+                    "away_pts":     2 if a_succ else 0,
+                    "home_pts":     2 if h_succ else 0,
                     "away_success": a_succ,
                     "home_success": h_succ,
                 })
                 st.session_state.first_possession_logged = False
                 st.session_state.first_possession_key    = None
                 if st.session_state.away_score != st.session_state.home_score:
-                    pass  # game over — stay on display
+                    pass  # game over
                 else:
                     st.session_state.ot_period += 1
-                st.rerun()
+            st.rerun()
+
+        # Success: solid team color. Failure: inverted — team color text on fg background.
+        st.sidebar.markdown(
+            f"<style>"
+            f"div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:first-child {{"
+            f"  background-color: {off_bg} !important; color: {off_fg} !important;"
+            f"  border: none !important; font-size:1.1rem !important; font-weight:800 !important;"
+            f"  border-radius:8px !important; width:100% !important;"
+            f"}}"
+            f"div[data-testid='stSidebar'] [data-testid='stHorizontalBlock'] button:last-child {{"
+            f"  background-color: {off_fg} !important; color: {off_bg} !important;"
+            f"  border: 2px solid {off_bg} !important; font-size:1.1rem !important; font-weight:800 !important;"
+            f"  border-radius:8px !important; width:100% !important;"
+            f"}}"
+            f"</style>",
+            unsafe_allow_html=True,
+        )
+        sb1, sb2 = st.sidebar.columns(2)
+        with sb1:
+            if st.button("Success", key="btn_success"):
+                _log_shootout("Success")
+        with sb2:
+            if st.button("Failure", key="btn_failure"):
+                _log_shootout("Failure")
 
         field_position = down = distance = None
 
