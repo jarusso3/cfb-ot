@@ -870,7 +870,7 @@ def render_sidebar() -> dict:
         # ── Label ──
         st.sidebar.markdown(
             f"<div style='font-size:0.8rem;color:#aaa;margin:6px 0 4px 0;'>"
-            f"<strong style='color:#fff;'>{ball_team}</strong> — log result:</div>",
+            f"<strong style='color:{off_bg};filter:brightness(1.6);'>{ball_team}</strong> — log result:</div>",
             unsafe_allow_html=True,
         )
 
