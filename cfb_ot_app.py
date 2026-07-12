@@ -51,9 +51,9 @@ OFFENSE_PTS = {"td_pat": 7, "td_2pt": 8, "td_6": 6, "fg": 3, "turnover": 0, "def
 DEFENSE_PTS = {"td_pat": 0, "td_2pt": 0, "td_6": 0, "fg": 0, "turnover": 0, "def_td": 6}
 
 OUTCOME_COLORS = {
-    "td_2pt":   "#1B5E20",  # 8-pt TD — dark green
-    "td_pat":   "#2E7D32",  # 7-pt TD — green
-    "td_6":     "#66BB6A",  # 6-pt TD — light green
+    "td_2pt":   "#2E7D32",  # 8-pt TD — dark green
+    "td_pat":   "#43A047",  # 7-pt TD — green
+    "td_6":     "#5CB860",  # 6-pt TD — light green
     "fg":       "#F9A825",  # field goal — yellow
     "turnover": "#BDBDBD",  # turnover / miss FG — light gray
     "def_td":   "#616161",  # defensive TD — dark gray
