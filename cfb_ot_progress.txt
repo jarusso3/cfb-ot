@@ -107,6 +107,10 @@ TODO — Next Session
 
 Done / Verified
 ---------------
+- Neutral defaults: added generic "AWAY" (orange #E8710A) and "HOME"
+  (green #2E7D32) placeholder teams at the top of the dropdown, with matching
+  TEAM_COLORS/TEAM_ABBR entries. App now opens on AWAY vs HOME instead of
+  Alabama vs Georgia; real teams still selectable below.
 - OT3+ shootout UI (was TODO #3): team-colored Success/Failure buttons,
   first-possession badge, tracker-box integration — implemented and live.
 - Aggressiveness sliders (UI + model): two side-by-side team-color-coded

@@ -7,7 +7,11 @@ import numpy as np
 
 # ── constants ──────────────────────────────────────────────────────────────────
 
-FBS_TEAMS = [
+# Generic placeholder "teams" — the app defaults to these so it opens neutral
+# rather than on real matchups. Listed first so they sit at the top of the dropdown.
+GENERIC_TEAMS = ["AWAY", "HOME"]
+
+FBS_TEAMS = GENERIC_TEAMS + [
     "Air Force", "Akron", "Alabama", "Appalachian State", "Arizona", "Arizona State",
     "Arkansas", "Arkansas State", "Army", "Auburn", "Ball State", "Baylor", "Boise State",
     "Boston College", "Bowling Green", "Buffalo", "BYU", "California", "Central Michigan",
@@ -62,6 +66,7 @@ PERIOD_COLORS = {
 }
 
 TEAM_ABBR = {
+    "AWAY":               "AWAY", "HOME":               "HOME",
     "Air Force":          "AFA",  "Akron":              "AKR",  "Alabama":            "ALA",
     "Appalachian State":  "APP",  "Arizona":            "ARIZ", "Arizona State":      "ASU",
     "Arkansas":           "ARK",  "Arkansas State":     "ARST", "Army":               "ARMY",
@@ -113,6 +118,8 @@ def team_abbr(name: str) -> str:
 
 
 TEAM_COLORS = {
+    "AWAY":               "#E8710A",  # orange
+    "HOME":               "#2E7D32",  # green
     "Air Force":          "#003087",
     "Akron":              "#041E42",
     "Alabama":            "#9E1B32",
@@ -662,9 +669,9 @@ def render_sidebar() -> dict:
     with st.sidebar.expander("Game Setup", expanded=not bool(st.session_state.get("ot_history")) and not st.session_state.get("first_possession_logged")):
         t1, t2 = st.columns(2)
         with t1:
-            away_team = st.selectbox("Away", FBS_TEAMS, index=FBS_TEAMS.index("Alabama"), key="away_team")
+            away_team = st.selectbox("Away", FBS_TEAMS, index=FBS_TEAMS.index("AWAY"), key="away_team")
         with t2:
-            home_team = st.selectbox("Home", FBS_TEAMS, index=FBS_TEAMS.index("Georgia"), key="home_team")
+            home_team = st.selectbox("Home", FBS_TEAMS, index=FBS_TEAMS.index("HOME"), key="home_team")
 
         reg_score = st.number_input(
             "Tied score entering OT", min_value=0, max_value=999, step=1,
@@ -694,8 +701,8 @@ def render_sidebar() -> dict:
         st.caption("  \n".join(seq))
 
     # Read team names back from session state if expander was collapsed
-    away_team = st.session_state.get("away_team", FBS_TEAMS[0])
-    home_team = st.session_state.get("home_team", FBS_TEAMS[0])
+    away_team = st.session_state.get("away_team", "AWAY")
+    home_team = st.session_state.get("home_team", "HOME")
     ot1_first = st.session_state.get("ot1_first", "Away")
     ot_period = st.session_state.ot_period
 
