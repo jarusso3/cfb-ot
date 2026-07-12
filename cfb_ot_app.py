@@ -51,13 +51,17 @@ OFFENSE_PTS = {"td_pat": 7, "td_2pt": 8, "td_6": 6, "fg": 3, "turnover": 0, "def
 DEFENSE_PTS = {"td_pat": 0, "td_2pt": 0, "td_6": 0, "fg": 0, "turnover": 0, "def_td": 6}
 
 OUTCOME_COLORS = {
-    "td_pat":   "#2E7D32",
-    "td_2pt":   "#1B5E20",
-    "td_6":     "#66BB6A",
-    "fg":       "#1565C0",
-    "turnover": "#C62828",
-    "def_td":   "#E65100",
+    "td_2pt":   "#1B5E20",  # 8-pt TD — dark green
+    "td_pat":   "#2E7D32",  # 7-pt TD — green
+    "td_6":     "#66BB6A",  # 6-pt TD — light green
+    "fg":       "#F9A825",  # field goal — yellow
+    "turnover": "#BDBDBD",  # turnover / miss FG — light gray
+    "def_td":   "#616161",  # defensive TD — dark gray
 }
+
+# Order the drive pie arcs should follow (counter-clockwise): the three TDs by
+# points (8 → 7 → 6), then FG, then the two zero-offense outcomes.
+PIE_ORDER = ["td_2pt", "td_pat", "td_6", "fg", "turnover", "def_td"]
 
 PERIOD_COLORS = {
     "away_wins": "#1565C0",
@@ -593,17 +597,27 @@ def game_length_table(away_probs: dict, home_probs: dict,
 # ── chart helpers ──────────────────────────────────────────────────────────────
 
 def pie_chart(data: pd.DataFrame, title: str) -> alt.Chart:
+    # If the data carries an explicit "order" column, stack arcs by it so the
+    # slice sequence is deterministic (see PIE_ORDER); otherwise fall back to
+    # value order.
+    theta_kwargs = {"field": "value", "type": "quantitative", "stack": True}
+    encode_kwargs = {}
+    if "order" in data.columns:
+        encode_kwargs["order"] = alt.Order("order:Q")
+        theta_kwargs["sort"] = None
     return (
         alt.Chart(data)
         .encode(
-            theta=alt.Theta(field="value", type="quantitative", stack=True),
+            theta=alt.Theta(**theta_kwargs),
             color=alt.Color(
                 field="label", type="nominal",
+                sort=data["label"].tolist(),
                 scale=alt.Scale(domain=data["label"].tolist(), range=data["color"].tolist()),
                 legend=alt.Legend(title=None, orient="bottom", columns=2),
             ),
             tooltip=[alt.Tooltip("label:N", title="Outcome"),
                      alt.Tooltip("value:Q", title="Probability", format=".1%")],
+            **encode_kwargs,
         )
         .mark_arc(innerRadius=50, outerRadius=110)
         .properties(title=title, width=300, height=280)
@@ -1291,19 +1305,21 @@ def render_main(inputs: dict):
             st.metric(f"{home_team} 2-pt Success", f"{home_succ:.1%}")
     else:
         with away_pie_col:
-            away_df = pd.DataFrame([{"label": OUTCOME_LABELS[k], "value": v, "color": OUTCOME_COLORS[k]}
-                                     for k, v in away_probs.items()])
+            away_df = pd.DataFrame([{"label": OUTCOME_LABELS[k], "value": away_probs[k],
+                                     "color": OUTCOME_COLORS[k], "order": i}
+                                    for i, k in enumerate(PIE_ORDER)])
             st.altair_chart(pie_chart(away_df, f"{away_team} Drive"), use_container_width=True)
         with home_pie_col:
-            home_df = pd.DataFrame([{"label": OUTCOME_LABELS[k], "value": v, "color": OUTCOME_COLORS[k]}
-                                     for k, v in home_probs.items()])
+            home_df = pd.DataFrame([{"label": OUTCOME_LABELS[k], "value": home_probs[k],
+                                     "color": OUTCOME_COLORS[k], "order": i}
+                                    for i, k in enumerate(PIE_ORDER)])
             st.altair_chart(pie_chart(home_df, f"{home_team} Drive"), use_container_width=True)
 
         with st.expander("Drive probability breakdown"):
             st.dataframe(
                 pd.DataFrame([{"Outcome": OUTCOME_LABELS[k],
                                 away_team: f"{away_probs[k]:.1%}",
-                                home_team: f"{home_probs[k]:.1%}"} for k in OUTCOME_LABELS]),
+                                home_team: f"{home_probs[k]:.1%}"} for k in PIE_ORDER]),
                 hide_index=True, use_container_width=True,
             )
 
