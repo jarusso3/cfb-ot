@@ -83,9 +83,10 @@ Fixed — 2026-07-12
 
 TODO — Next Session
 -------------------
-1. Team Aggressiveness (DEFERRED — revisit later)
-   Bundles the old "TD XP/2PC Logic" + "Aggressiveness Ratings" items. A
-   per-team aggressiveness rating that drives:
+1. Team Aggressiveness — MODEL WIRING (UI done; not yet hooked to math)
+   Two per-team aggressiveness sliders now exist in the sidebar (0.0-1.0,
+   default 0.5, team-color-coded, under Off/Def Tendency), returned as
+   away_aggr / home_aggr but NOT yet used by any probability logic. Next:
      * go-for-2 vs kick PAT after a TD (informed by score differential),
      * go-for-it vs FG on 4th down,
    skewing the drive outcome distribution accordingly. Note: the current
@@ -107,3 +108,9 @@ Done / Verified
 ---------------
 - OT3+ shootout UI (was TODO #3): team-colored Success/Failure buttons,
   first-possession badge, tracker-box integration — implemented and live.
+- Aggressiveness sliders (UI only): two side-by-side team-color-coded sliders
+  under Off/Def Tendency, 0.0-1.0 (default 0.5). Returned as away_aggr/home_aggr,
+  preserved across Full Reset. NOT wired to the model yet (see TODO #1).
+- Sidebar compaction: injected CSS to trim top padding, widget gaps, caption
+  and header margins so controls fit with less scrolling. (CSS targets
+  Streamlit internal DOM — re-verify if Streamlit version changes.)

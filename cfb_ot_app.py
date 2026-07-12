@@ -601,6 +601,26 @@ def init_state():
 
 def render_sidebar() -> dict:
 
+    # ── Compact sidebar spacing ──
+    # Streamlit's default sidebar has generous padding/gaps; tighten them so the
+    # controls fit without so much scrolling.
+    st.sidebar.markdown(
+        "<style>"
+        # trim the big top padding above the first widget
+        "section[data-testid='stSidebar'] div[data-testid='stSidebarUserContent']{padding-top:1rem!important;}"
+        # shrink the vertical gap between stacked widgets
+        "section[data-testid='stSidebar'] div[data-testid='stVerticalBlock']{gap:0.4rem!important;}"
+        # pull slider value/label rows in tight
+        "section[data-testid='stSidebar'] div[data-testid='stSlider']{padding-bottom:0!important;}"
+        # tighten captions and markdown headers
+        "section[data-testid='stSidebar'] div[data-testid='stCaptionContainer']{margin-top:-4px!important;margin-bottom:0!important;}"
+        "section[data-testid='stSidebar'] div[data-testid='stMarkdownContainer'] p{margin-bottom:0.15rem!important;}"
+        # slimmer expander + dataframe padding
+        "section[data-testid='stSidebar'] div[data-testid='stExpander']{margin-bottom:0.3rem!important;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
     # ── Game Setup (collapsible) ──
     with st.sidebar.expander("Game Setup", expanded=not bool(st.session_state.get("ot_history")) and not st.session_state.get("first_possession_logged")):
         t1, t2 = st.columns(2)
@@ -668,6 +688,46 @@ def render_sidebar() -> dict:
     else:
         tend_label = "Neutral"
     st.sidebar.caption(f"Environment: **{tend_label}**")
+
+    # ── Team aggressiveness (UI only — not yet wired to the model) ──
+    away_bg = team_color(away_team)
+    home_bg = team_color(home_team)
+    # Color each aggressiveness slider's thumb to its team. These are the only
+    # column-wrapped sliders in the sidebar (away = 1st column, home = 2nd), so
+    # target by column position — robust regardless of other sidebar widgets.
+    st.sidebar.markdown(
+        f"<style>"
+        f"section[data-testid='stSidebar'] div[data-testid='column']:nth-of-type(1) "
+        f"div[role='slider']{{background:{away_bg}!important;border-color:{away_bg}!important}}"
+        f"section[data-testid='stSidebar'] div[data-testid='column']:nth-of-type(2) "
+        f"div[role='slider']{{background:{home_bg}!important;border-color:{home_bg}!important}}"
+        f"</style>",
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown("**Aggressiveness**")
+    ag1, ag2 = st.sidebar.columns(2)
+    with ag1:
+        st.markdown(
+            f"<div style='font-size:0.72rem;font-weight:700;color:{away_bg};"
+            f"filter:brightness(1.6);margin-bottom:-6px;'>{team_abbr(away_team)}</div>",
+            unsafe_allow_html=True,
+        )
+        away_aggr = st.slider(
+            "Away aggressiveness", 0.0, 1.0, 0.5, 0.05, key="away_aggr",
+            label_visibility="collapsed",
+            help="Higher = more likely to go for it on 4th down and go for 2 after a TD.",
+        )
+    with ag2:
+        st.markdown(
+            f"<div style='font-size:0.72rem;font-weight:700;color:{home_bg};"
+            f"filter:brightness(1.6);margin-bottom:-6px;'>{team_abbr(home_team)}</div>",
+            unsafe_allow_html=True,
+        )
+        home_aggr = st.slider(
+            "Home aggressiveness", 0.0, 1.0, 0.5, 0.05, key="home_aggr",
+            label_visibility="collapsed",
+            help="Higher = more likely to go for it on 4th down and go for 2 after a TD.",
+        )
 
     is_shootout = ot_period >= 3
     first_this  = first_team_for_period(ot_period, ot1_first)
@@ -920,7 +980,8 @@ def render_sidebar() -> dict:
     if st.sidebar.button("⚠️ Full Reset", type="secondary", key="reset_btn", use_container_width=True):
         for k in list(st.session_state.keys()):
             if k not in ("away_team", "home_team", "strength_delta",
-                         "off_def_tendency", "ot1_first_radio"):
+                         "off_def_tendency", "ot1_first_radio",
+                         "away_aggr", "home_aggr"):
                 del st.session_state[k]
         for k in ("prev_ytg", "cur_down", "cur_dist"):
             st.session_state.pop(k, None)
@@ -942,6 +1003,8 @@ def render_sidebar() -> dict:
         "home_team":                home_team,
         "strength_delta":           strength_delta,
         "off_def_tendency":         off_def_tendency,
+        "away_aggr":                away_aggr,
+        "home_aggr":                home_aggr,
         "away_score":               st.session_state.away_score,
         "home_score":               st.session_state.home_score,
         "ot_period":                ot_period,
