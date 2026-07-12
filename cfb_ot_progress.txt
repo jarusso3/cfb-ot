@@ -1,0 +1,109 @@
+Project: CFB OT Pricer
+File: cfb_ot_app.py
+Location: C:/Users/ja.russo/Desktop/BARNEY/CFB OT Pricer/
+
+Overview
+--------
+A Streamlit app for pricing and tracking College Football overtime markets.
+Given two FBS teams, user-defined strength parameters, and a live score, the
+app computes drive outcome probabilities, current OT period win/tie/advance
+probabilities, and a full game-length market table covering OT 1 through OT 7+.
+
+The app correctly models the two CFB overtime rule regimes:
+  - OT 1–2: Full possession OT (each team gets one possession from the 25-yd line).
+    Drive outcomes: TD+PAT (7), TD+2pt (8), TD (6 / missed PAT), FG (3),
+    Turnover / Missed FG (0), Defensive TD (6 for the defense).
+  - OT 3+: 2-pt conversion shootout (each team runs one play from the 3-yd line).
+    Outcome per team: Success (2pts) or Failure (0pts).
+
+State is fully managed via st.session_state so the OT history, scores, and
+period counter persist through user interactions.
+
+v0.1 Changelog
+--------------
+- Built complete Streamlit app from scratch, self-contained, no external data files.
+- Implemented all 134 FBS teams in a sorted dropdown for Away/Home selection.
+- Sidebar controls:
+    * Team selection dropdowns (Away / Home).
+    * "Overall Strength" slider (-1.0 to +1.0, step 0.05) — shifts TD vs FG/turnover
+      rates for the offensive team. Dynamic label shows favored team or "Even".
+    * "Off/Def Tendency" slider (-1.0 to +1.0, step 0.05) — scales the overall
+      scoring environment up or down. Dynamic label shows game type.
+    * Away / Home score inputs (synced with session_state).
+    * Compact OT history scoreboard table (standard OT shows TD-7/FG-3/--- labels;
+      shootout shows checkmark/X per team).
+    * "Possession order" radio — Away first vs Home first per period.
+    * Current situation panel:
+        - Standard OT: field position slider (1–99), down selectbox, distance input,
+          plus per-team outcome selectboxes for logging.
+        - Shootout (OT 3+): simplified Success/Failure radio per team.
+    * "Log Result" button — records period outcome, updates scores, advances period.
+    * "Reset" button — clears all history and resets to OT 1, score 0-0.
+- Probability engine (base_drive_probs):
+    * Starts from calibrated base rates: td_pat=35%, td_2pt=5%, td_6=3%,
+      fg=20%, turnover=32%, def_td=5%.
+    * Applies off_def_tendency multipliers to scoring categories then renormalizes.
+    * Applies strength_delta multipliers for the specific offense then renormalizes.
+    * Away and home each get their own probs (strength_delta sign flips for home).
+- period_outcome_probs: full enumeration of all 36 away×home outcome combinations,
+  yielding P(away wins period), P(home wins period), P(advances to next OT).
+- shootout_period_probs: closed-form P(away wins), P(home wins), P(tied) for the
+  2-pt conversion shootout, with success probability scaled by off_def_tendency.
+- game_length_table: chains period-level probabilities to produce cumulative
+  P(ends this OT) and P(game still live) for OT 1 through OT 7+.
+- Main panel sections:
+    1. Drive Outcome Probabilities — Altair donut charts for Away and Home drives;
+       expandable breakdown table.
+    2. Current OT Period Outcome — Altair donut chart + metric cards for
+       away wins / home wins / advances.
+    3. Game Length Markets — styled DataFrame table + Altair bar chart showing
+       the game-length distribution across OT 1–7+.
+- No scipy, no external data files; only stdlib + streamlit + altair + pandas.
+- Run with: streamlit run cfb_ot_app.py
+
+Fixed — 2026-07-12
+------------------
+- Moneyline win-prob bug: game_win_probs was reusing the current period's
+  live/collapsed drive distributions for all hypothetical FUTURE periods, so
+  a team that had just scored was assumed to score again with certainty every
+  future OT. This massively over-favored the first team to score (post-TD home
+  win prob showed ~19% when it should be ~29%). Fixed by threading separate
+  future_away_probs/future_home_probs (the neutral base dists) into the
+  recursion. Committed 056ee12. (Even-matched post-TD home win prob now ~29%.)
+
+- Two-step TD scoring: pressing TD no longer scores immediately. It enters a
+  pending state (pending_td) that (a) converges the ball team's drive
+  distribution onto the three TD point totals 6/7/8, renormalized, in both the
+  drive pie and the moneyline, and (b) swaps the TD/FG/TO button row for a
+  +2 / +1 / +0 row. Those finalize as td_2pt (8), td_pat (7), td_6 (6)
+  respectively via the existing _log_result path, so scoring stays correct for
+  both first- and second-possession cases. Verified win probs: Away-first TD
+  then +1 -> home 29%, +2 -> home 2%, +0 -> home 55%. Full Reset clears
+  pending_td cleanly. Shootout (OT3+) flow unchanged.
+
+TODO — Next Session
+-------------------
+1. Team Aggressiveness (DEFERRED — revisit later)
+   Bundles the old "TD XP/2PC Logic" + "Aggressiveness Ratings" items. A
+   per-team aggressiveness rating that drives:
+     * go-for-2 vs kick PAT after a TD (informed by score differential),
+     * go-for-it vs FG on 4th down,
+   skewing the drive outcome distribution accordingly. Note: the current
+   ~29% post-TD home number includes ~4.5% for the trailing team winning
+   outright via a 2-pt conversion — modeling the go-for-2 decision properly
+   is exactly what this item will refine.
+
+2. OT3+ Moneyline Odds  (BLOCKED on data sourcing)
+   The shootout moneyline uses a simple closed-form formula. Improve to use
+   actual historical 2-pt conversion success rates + team-strength
+   adjustments; game-length table should reflect realistic advance rates.
+
+3. Injections and Automations  (BLOCKED — needs live data feed; discuss first)
+   Auto-populate field position / down / distance from a live feed (ESPN API
+   or similar) so the user doesn't hand-track the drive. Also consider
+   auto-advancing the period when both possessions are logged.
+
+Done / Verified
+---------------
+- OT3+ shootout UI (was TODO #3): team-colored Success/Failure buttons,
+  first-possession badge, tracker-box integration — implemented and live.

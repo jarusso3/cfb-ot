@@ -585,6 +585,8 @@ def init_state():
         "ot1_first":               "Away",
         "first_possession_logged": False,
         "first_possession_key":    None,
+        # True after the TD button is pressed but before the PAT try (+2/+1/+0) is chosen.
+        "pending_td":              False,
         # Points the first possessor scored in the current period (offense + any def TD against them)
         # Needed for mid-period probability calculations. Always in "first possessor's frame".
         "period_first_pts":        0,
@@ -816,6 +818,7 @@ def render_sidebar() -> dict:
             off = OFFENSE_PTS[outcome_key]
             dfd = DEFENSE_PTS[outcome_key]
             reset_keys = ("field_position", "down_select", "distance_input", "prev_ytg", "cur_down", "cur_dist")
+            st.session_state.pending_td = False  # PAT try resolved (or non-TD outcome)
             if not st.session_state.first_possession_logged:
                 if first_this == "Away":
                     st.session_state.away_score += off
@@ -876,16 +879,36 @@ def render_sidebar() -> dict:
             f"</style>"
         )
         st.sidebar.markdown(btn_css, unsafe_allow_html=True)
-        b1, b2, b3 = st.sidebar.columns(3)
-        with b1:
-            if st.button("TD", key="btn_td", use_container_width=True):
-                _log_result("td_pat")
-        with b2:
-            if st.button("FG", key="btn_fg", use_container_width=True):
-                _log_result("fg")
-        with b3:
-            if st.button("TO", key="btn_to", use_container_width=True):
-                _log_result("turnover")
+
+        if st.session_state.pending_td:
+            # ── TD scored — choose the try: +2 (2pt), +1 (PAT), +0 (missed) ──
+            st.sidebar.markdown(
+                f"<div style='font-size:0.8rem;color:#aaa;margin:2px 0 4px 0;'>"
+                f"<strong style='color:#fff;'>{ball_team}</strong> scored a TD — the try:</div>",
+                unsafe_allow_html=True,
+            )
+            pb1, pb2, pb3 = st.sidebar.columns(3)
+            with pb1:
+                if st.button("+2", key="btn_pat2", use_container_width=True):
+                    _log_result("td_2pt")   # 8 pts
+            with pb2:
+                if st.button("+1", key="btn_pat1", use_container_width=True):
+                    _log_result("td_pat")   # 7 pts
+            with pb3:
+                if st.button("+0", key="btn_pat0", use_container_width=True):
+                    _log_result("td_6")     # 6 pts
+        else:
+            b1, b2, b3 = st.sidebar.columns(3)
+            with b1:
+                if st.button("TD", key="btn_td", use_container_width=True):
+                    st.session_state.pending_td = True
+                    st.rerun()
+            with b2:
+                if st.button("FG", key="btn_fg", use_container_width=True):
+                    _log_result("fg")
+            with b3:
+                if st.button("TO", key="btn_to", use_container_width=True):
+                    _log_result("turnover")
 
     # Full Reset
     st.sidebar.markdown(
@@ -998,6 +1021,27 @@ def render_main(inputs: dict):
             away_probs = collapsed
         else:
             home_probs = collapsed
+
+    # TD pending — the ball team has scored a TD but the try (+2/+1/+0) isn't chosen
+    # yet. Converge that team's distribution onto the three TD point totals (6/7/8),
+    # renormalized, so both the drive pie and the moneyline reflect the certain TD.
+    if st.session_state.get("pending_td") and not is_shootout:
+        td_keys = ("td_pat", "td_2pt", "td_6")
+        ball_is_away = (
+            (inputs["first_this"] == "Away" and not first_possession_logged) or
+            (inputs["first_this"] == "Home" and first_possession_logged)
+        )
+        src = away_probs if ball_is_away else home_probs
+        td_mass = sum(src[k] for k in td_keys)
+        if td_mass > 0:
+            converged = {k: (src[k] / td_mass if k in td_keys else 0.0) for k in OUTCOME_LABELS}
+        else:
+            # No TD mass to reweight (e.g. already collapsed elsewhere) — split evenly.
+            converged = {k: (1.0 / len(td_keys) if k in td_keys else 0.0) for k in OUTCOME_LABELS}
+        if ball_is_away:
+            away_probs = converged
+        else:
+            home_probs = converged
 
     away_bg  = team_color(away_team)
     home_bg  = team_color(home_team)
