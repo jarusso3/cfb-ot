@@ -1096,31 +1096,27 @@ def render_main(inputs: dict):
     away_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 + strength_delta * 0.1))
     home_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 - strength_delta * 0.1))
 
-    # Live distributions — use actual down/distance/field position for whichever team
-    # currently has the ball. The other team always uses OT defaults (their drive hasn't started).
-    # Aggressiveness applies ONLY to the team with the ball (the active drive).
-    # The non-active team uses OT-start defaults with aggressiveness=0, and the
-    # base/future distributions are never affected — by the time a team next
-    # possesses, that drive becomes the active one and its slider applies then.
+    # Live distributions — both teams' CURRENT-period drives. Each team always
+    # carries its OWN aggressiveness (it's a team property for this period, and both
+    # teams possess within the period). What flips based on possession is only the
+    # FIELD SITUATION: the team with the ball uses the live down/distance/field
+    # position; the other team uses OT-start defaults (their drive hasn't begun).
+    # The base/future distributions (away_probs_base/home_probs_base above) stay at
+    # aggressiveness=0, so future OT PERIODS are unaffected until they become current.
     first_this_live = inputs["first_this"]
     if not is_shootout:
+        # Which side currently has the ball?
         if not first_possession_logged:
-            # First team is up — apply live situation + their aggressiveness to them
-            if first_this_live == "Away":
-                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr)
-                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
-            else:
-                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
-                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr)
+            ball_side = first_this_live
         else:
-            # Second team is up — apply live situation + their aggressiveness; first team is already collapsed
-            second_this_live = "Home" if first_this_live == "Away" else "Away"
-            if second_this_live == "Away":
-                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr)
-                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
-            else:
-                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
-                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr)
+            ball_side = "Home" if first_this_live == "Away" else "Away"
+
+        if ball_side == "Away":
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, home_aggr)
+        else:
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25, away_aggr)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr)
     else:
         away_probs_live = dict(away_probs_base)
         home_probs_live = dict(home_probs_base)
