@@ -281,7 +281,8 @@ def load_model():
 # ── probability engine ─────────────────────────────────────────────────────────
 
 def base_drive_probs(strength_delta: float, off_def_tendency: float,
-                     down: int = 1, distance: int = 10, yards_to_goal: int = 25) -> dict:
+                     down: int = 1, distance: int = 10, yards_to_goal: int = 25,
+                     aggressiveness: float = 0.0) -> dict:
     """
     Returns a drive outcome probability distribution using the trained ML model
     as the base, then applies strength and tendency adjustments on top.
@@ -289,6 +290,11 @@ def base_drive_probs(strength_delta: float, off_def_tendency: float,
     strength_delta  > 0 → this team's offense is stronger
     off_def_tendency > 0 → high-scoring game; < 0 → defensive game
     down/distance/yards_to_goal → field situation (defaults to OT start)
+    aggressiveness   0 → normal play (no effect); 1 → fairly extreme. Suppresses
+                     FG (going for it instead of kicking), pushing that mass into
+                     TD and turnover, and shifts the TD point-split from PAT (7)
+                     toward 2pt (8) and missed-PAT (6). Meant for the ACTIVE drive
+                     only — leave at 0 for base/future distributions.
     """
     payload = load_model()
     model   = payload["model"]
@@ -334,6 +340,37 @@ def base_drive_probs(strength_delta: float, off_def_tendency: float,
             p[k] *= (1 + off_def_tendency * 0.3)
         p["fg"]       *= (1 - off_def_tendency * 0.2)
         p["turnover"] *= (1 - off_def_tendency * 0.4)
+
+    # Apply aggressiveness (0 = normal, 1 = fairly extreme). Active-drive only.
+    a = max(0.0, min(1.0, aggressiveness))
+    if a > 0:
+        # 1) Suppress FGs — the team goes for it instead of kicking. At a=1 we strip
+        #    ~85% of FG mass and reallocate it: more to TD (they convert) than to
+        #    turnover (they fail on downs). Split the freed mass 60/40 TD/turnover.
+        fg_removed = p["fg"] * (0.85 * a)
+        p["fg"] -= fg_removed
+        td_mass_before = sum(p[k] for k in td_keys)
+        if td_mass_before > 0:
+            # distribute the TD share proportionally across the existing td split
+            td_gain = fg_removed * 0.60
+            for k in td_keys:
+                p[k] += td_gain * (p[k] / td_mass_before)
+        else:
+            p["td_pat"] += fg_removed * 0.60
+        p["turnover"] += fg_removed * 0.40
+
+        # 2) Shift the TD point-split away from PAT (7) toward 2pt (8) and miss (6).
+        #    Reweight the TD mass onto new fractions that ramp with a. Normal split
+        #    is 87/8/5 (pat/2pt/6); at a=1 it moves toward ~55/33/12.
+        td_mass = sum(p[k] for k in td_keys)
+        if td_mass > 0:
+            frac_pat = 0.87 - 0.32 * a
+            frac_2pt = 0.08 + 0.25 * a
+            frac_6   = 0.05 + 0.07 * a
+            s = frac_pat + frac_2pt + frac_6
+            p["td_pat"] = td_mass * frac_pat / s
+            p["td_2pt"] = td_mass * frac_2pt / s
+            p["td_6"]   = td_mass * frac_6   / s
 
     total = sum(p.values())
     return {k: v / total for k, v in p.items()}
@@ -713,9 +750,10 @@ def render_sidebar() -> dict:
             unsafe_allow_html=True,
         )
         away_aggr = st.slider(
-            "Away aggressiveness", 0.0, 1.0, 0.5, 0.05, key="away_aggr",
+            "Away aggressiveness", 0.0, 1.0, 0.0, 0.05, key="away_aggr",
             label_visibility="collapsed",
-            help="Higher = more likely to go for it on 4th down and go for 2 after a TD.",
+            help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO) "
+                 "and skews TD tries toward 2pt (8) / miss (6) vs PAT (7).",
         )
     with ag2:
         st.markdown(
@@ -724,9 +762,10 @@ def render_sidebar() -> dict:
             unsafe_allow_html=True,
         )
         home_aggr = st.slider(
-            "Home aggressiveness", 0.0, 1.0, 0.5, 0.05, key="home_aggr",
+            "Home aggressiveness", 0.0, 1.0, 0.0, 0.05, key="home_aggr",
             label_visibility="collapsed",
-            help="Higher = more likely to go for it on 4th down and go for 2 after a TD.",
+            help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO) "
+                 "and skews TD tries toward 2pt (8) / miss (6) vs PAT (7).",
         )
 
     is_shootout = ot_period >= 3
@@ -1035,6 +1074,8 @@ def render_main(inputs: dict):
     is_shootout            = inputs["is_shootout"]
     ot1_first              = inputs["ot1_first"]
     first_possession_logged = inputs["first_possession_logged"]
+    away_aggr              = inputs.get("away_aggr", 0.0)
+    home_aggr              = inputs.get("home_aggr", 0.0)
 
     # Live situation from sidebar (default to OT start if not set)
     live_down       = inputs.get("down_int", 1)
@@ -1050,25 +1091,29 @@ def render_main(inputs: dict):
 
     # Live distributions — use actual down/distance/field position for whichever team
     # currently has the ball. The other team always uses OT defaults (their drive hasn't started).
+    # Aggressiveness applies ONLY to the team with the ball (the active drive).
+    # The non-active team uses OT-start defaults with aggressiveness=0, and the
+    # base/future distributions are never affected — by the time a team next
+    # possesses, that drive becomes the active one and its slider applies then.
     first_this_live = inputs["first_this"]
     if not is_shootout:
         if not first_possession_logged:
-            # First team is up — apply live situation to them
+            # First team is up — apply live situation + their aggressiveness to them
             if first_this_live == "Away":
-                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr)
                 home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
             else:
                 away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
-                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr)
         else:
-            # Second team is up — apply live situation to them; first team is already collapsed
+            # Second team is up — apply live situation + their aggressiveness; first team is already collapsed
             second_this_live = "Home" if first_this_live == "Away" else "Away"
             if second_this_live == "Away":
-                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+                away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr)
                 home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
             else:
                 away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
-                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg)
+                home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr)
     else:
         away_probs_live = dict(away_probs_base)
         home_probs_live = dict(home_probs_base)

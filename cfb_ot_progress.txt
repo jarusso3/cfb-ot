@@ -83,16 +83,17 @@ Fixed — 2026-07-12
 
 TODO — Next Session
 -------------------
-1. Team Aggressiveness — MODEL WIRING (UI done; not yet hooked to math)
-   Two per-team aggressiveness sliders now exist in the sidebar (0.0-1.0,
-   default 0.5, team-color-coded, under Off/Def Tendency), returned as
-   away_aggr / home_aggr but NOT yet used by any probability logic. Next:
-     * go-for-2 vs kick PAT after a TD (informed by score differential),
-     * go-for-it vs FG on 4th down,
-   skewing the drive outcome distribution accordingly. Note: the current
-   ~29% post-TD home number includes ~4.5% for the trailing team winning
-   outright via a 2-pt conversion — modeling the go-for-2 decision properly
-   is exactly what this item will refine.
+1. Aggressiveness × Down & Distance (NOT STARTED)
+   Aggressiveness currently applies a fixed adjustment regardless of field
+   situation. Ideally its impact should scale with down & distance — e.g. a
+   4th-and-1 should drive far more go-for-it (FG suppression) than a
+   4th-and-15, and late-down situations should influence the FG-vs-TD/TO
+   split more than 1st down. Deferred as too complex for now.
+
+2. Aggressiveness — score-aware 2pt decisioning (FUTURE)
+   The 8-vs-6-vs-7 TD split is currently a flat function of the slider. A
+   fuller model would make the go-for-2 choice depend on the score
+   differential (down 8 late → always go for 2, etc.).
 
 2. OT3+ Moneyline Odds  (BLOCKED on data sourcing)
    The shootout moneyline uses a simple closed-form formula. Improve to use
@@ -108,9 +109,16 @@ Done / Verified
 ---------------
 - OT3+ shootout UI (was TODO #3): team-colored Success/Failure buttons,
   first-possession badge, tracker-box integration — implemented and live.
-- Aggressiveness sliders (UI only): two side-by-side team-color-coded sliders
-  under Off/Def Tendency, 0.0-1.0 (default 0.5). Returned as away_aggr/home_aggr,
-  preserved across Full Reset. NOT wired to the model yet (see TODO #1).
+- Aggressiveness sliders (UI + model): two side-by-side team-color-coded
+  sliders under Off/Def Tendency, 0.0-1.0 (default 0.0 = normal play).
+  Preserved across Full Reset. Now WIRED into base_drive_probs via an
+  `aggressiveness` param: (1) suppresses FG (~85% of FG mass removed at a=1),
+  reallocating it 60/40 to TD/turnover; (2) shifts the within-TD point split
+  from 87/8/5 (pat/2pt/6) toward 55/33/12 as a rises. Applied to the ACTIVE
+  drive ONLY (the ball team's _live dist) — base/future distributions always
+  use aggressiveness=0, so future OTs are unaffected until they become active.
+  Verified: a=0 reproduces prior output exactly; FG 0.20->0.03 and TD/TO both
+  rise at a=1.
 - Sidebar compaction: injected CSS to trim top padding, widget gaps, caption
   and header margins so controls fit with less scrolling. (CSS targets
   Streamlit internal DOM — re-verify if Streamlit version changes.)
