@@ -412,12 +412,21 @@ def game_win_probs(away_probs: dict, home_probs: dict,
                    away_succ: float, home_succ: float,
                    current_period: int, ot1_first: str,
                    first_possession_logged: bool,
-                   period_first_pts: int, period_second_pts: int) -> dict:
+                   period_first_pts: int, period_second_pts: int,
+                   future_away_probs: dict | None = None,
+                   future_home_probs: dict | None = None) -> dict:
     """
     Compute P(away wins game outright) from the current live state.
 
     IMPORTANT: OT period outcomes are decided on within-period scores only.
     Teams always enter each period tied; we compare what each scores IN that period.
+
+    away_probs / home_probs describe the CURRENT period (may be live/collapsed —
+    e.g. the first possessor's outcome is known with certainty). future_away_probs /
+    future_home_probs describe FUTURE periods and must be the neutral base
+    distributions — never the live/collapsed ones, or every hypothetical future
+    period would inherit the current period's known result. Defaults to the current
+    dists for backward compatibility.
 
     Three cases:
       A. Shootout period (OT3+): closed-form.
@@ -428,6 +437,11 @@ def game_win_probs(away_probs: dict, home_probs: dict,
          that went to the second team). Enumerate only second team outcomes and
          compare resulting within-period totals.
     """
+    if future_away_probs is None:
+        future_away_probs = away_probs
+    if future_home_probs is None:
+        future_home_probs = home_probs
+
     s_away  = away_succ * (1 - home_succ)
     s_home  = (1 - away_succ) * home_succ
     s_total = s_away + s_home
@@ -437,7 +451,7 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         return {"away_wins": p_away_shootout, "home_wins": 1 - p_away_shootout}
 
     p_future_away = _p_away_wins_from_period_start(
-        current_period + 1, ot1_first, away_probs, home_probs, p_away_shootout
+        current_period + 1, ot1_first, future_away_probs, future_home_probs, p_away_shootout
     )
 
     first_this = first_team_for_period(current_period, ot1_first)
@@ -1000,6 +1014,8 @@ def render_main(inputs: dict):
         first_possession_logged,
         st.session_state.get("period_first_pts", 0),
         st.session_state.get("period_second_pts", 0),
+        future_away_probs=away_probs_base,
+        future_home_probs=home_probs_base,
     )
     away_win_p = gw["away_wins"]
     home_win_p = gw["home_wins"]
