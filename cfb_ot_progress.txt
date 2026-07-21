@@ -141,12 +141,21 @@ TODO — Next Session
    fuller model would make the go-for-2 choice depend on the score
    differential (down 8 late → always go for 2, etc.).
 
-2. OT3+ Moneyline Odds  (BLOCKED on data sourcing)
-   The shootout moneyline uses a simple closed-form formula. Improve to use
-   actual historical 2-pt conversion success rates + team-strength
-   adjustments; game-length table should reflect realistic advance rates.
+3. OT3+ Moneyline Odds — data upgrade  (PARTIALLY DONE; rest BLOCKED on data)
+   DONE 2026-07-21: shootout moneyline now updates mid-period (conditions on the
+   first team's logged attempt) and the 2-pt success rate is anchored on the
+   shared TWO_PT_BASE_RATE (0.45) instead of a magic 0.47.
+   STILL OPEN: swap the flat base rate for actual historical 2-pt conversion
+   rates + team-strength adjustments so the game-length advance rates reflect
+   real data rather than a league constant.
 
-3. Injections and Automations  (BLOCKED — needs live data feed; discuss first)
+4. Second-possessor edge — calibration follow-up  (OPEN, low priority)
+   SECOND_POSSESSOR_EDGE is a flat 0.17 constant. Once the aggressiveness ratings
+   are dialed in, the second-mover advantage should emerge behaviorally — at that
+   point reduce/zero the constant so we're not double-counting. Also decide
+   whether the shootout (OT3+) wants its own second-mover edge (currently none).
+
+5. Injections and Automations  (BLOCKED — needs live data feed; discuss first)
    Auto-populate field position / down / distance from a live feed (ESPN API
    or similar) so the user doesn't hand-track the drive. Also consider
    auto-advancing the period when both possessions are logged.
