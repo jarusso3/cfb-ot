@@ -864,7 +864,14 @@ def render_sidebar() -> dict:
     st.sidebar.markdown("**Team Strength**")
     raw_strength = st.sidebar.slider(
         "Overall Strength", -1.0, 1.0, 0.0, 0.05, key="strength_delta",
-        help="Negative = Away favored; positive = Home favored.",
+        help=(
+            "Negative = Away favored; positive = Home favored.\n\n"
+            "**Pricing guide (by pregame spread):**\n\n"
+            "- Spread 1–3 → ~PK, -120/-110 to -130/+100\n"
+            "- Spread 3–6 → ~-140/+110 to -150/+120\n"
+            "- Spread 7–10 → ~-170/+140 to -190/+145\n"
+            "- Spread 10+ → ~-230/+185 to -250/+200"
+        ),
     )
     strength_delta = -raw_strength
     if raw_strength < -0.02:
