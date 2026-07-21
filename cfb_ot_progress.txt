@@ -61,6 +61,52 @@ v0.1 Changelog
 - No scipy, no external data files; only stdlib + streamlit + altair + pandas.
 - Run with: streamlit run cfb_ot_app.py
 
+Fixed — 2026-07-21  (commit 72138a5)
+------------------------------------
+Four items from the 7/20 notes, all verified end-to-end (pure-fn tests + Streamlit
+AppTest button simulation) before commit:
+
+1. OT3+ shootout price flow-through (was the "prices don't update" bug).
+   game_win_probs previously returned a static closed-form shootout price for
+   period>=3, ignoring first_possession_logged. Now shootout_period_probs takes
+   optional (first_this, first_result) to condition on the first possessor's known
+   2-pt attempt, and game_win_probs threads a new first_shootout_result param so an
+   "advance" rolls into the unconditioned p_away_shootout. The moneyline, period pie,
+   and game-length advance rate all move when the first team goes. Verified: even OT3
+   50/50 -> Success 77.5% / Failure 27.5% for the first team.
+
+2. Mandatory 2-pt try in OT2+ (NCAA rule). base_drive_probs gained an ot_period param;
+   for period>=2 it zeroes td_pat (7) and splits TD mass into td_2pt (made, 8) /
+   td_6 (failed, 6) at TWO_PT_BASE_RATE. New constant TWO_PT_BASE_RATE=0.45 is the
+   single source of truth, also now anchoring away_succ/home_succ (was magic 0.47).
+   The base/future dists are built at ot_period=2 (the only future STANDARD period),
+   live dists use the actual period. UI: pending-TD row shows +2/+0 only (no +1) in OT2+.
+
+3. Play-undo button. UNDO_KEYS snapshot stack in session_state; push_undo() before
+   each play (TD press, FG, TO, shootout Success/Failure), pop_undo() restores and
+   wipes transient field widgets (resets to 1st & 10 from 25). One undo reverts a full
+   play including the pending-TD try. "↩ Undo last play (N)" button above Full Reset,
+   disabled when empty; Full Reset clears the stack.
+
+4. Second-possessor edge. SECOND_POSSESSOR_EDGE=0.17 (tunable; 0.0 disables). New
+   _apply_second_edge() tilts the SECOND possessor's dist toward scoring; applied
+   inside period_outcome_probs_ordered (Case B + game-length + recursion) and in
+   game_win_probs Case C. Calibrated so an even matchup's second team wins that OT
+   ~52.4% (OT1) / ~52.2% (OT2). Because possession ALTERNATES OT1<->OT2 the edge
+   largely cancels at the game level (~50/50) and shows up in per-period pricing —
+   matches JA's note that once aggressiveness ratings are dialed in this may emerge
+   naturally, at which point drop the constant to 0.
+   NOTE: edge is NOT applied to the OT3+ shootout (symmetric already; has its own
+   mid-period conditioning). Revisit if a shootout second-mover edge is wanted.
+
+Item verified as ALREADY working: possession reset to 1st & 10 from the 25 — _log_result
+deletes the field-position keys on each possession, so sliders revert on rerun; undo
+also wipes them via _TRANSIENT_KEYS.
+
+Also fixed a latent bug while here: _apply_second_edge originally used a frozen default
+arg (edge=SECOND_POSSESSOR_EDGE bound at def time) — changed to resolve the constant at
+call time so retuning the constant actually takes effect.
+
 Fixed — 2026-07-12
 ------------------
 - Moneyline win-prob bug: game_win_probs was reusing the current period's
