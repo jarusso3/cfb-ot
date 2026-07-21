@@ -45,6 +45,22 @@ OUTCOME_LABELS = {
     "def_td":   "Defensive TD (6 pts, defense scores)",
 }
 
+# League-average 2-pt conversion success rate. Single source of truth: drives both
+# the mandatory-2pt TD split in OT2+ (td_2pt made vs td_6 failed) and the OT3+
+# shootout success baseline, so the two rule regimes stay consistent.
+TWO_PT_BASE_RATE = 0.45
+
+# Second-possessor edge. The team that possesses SECOND in a given OT has an
+# information advantage (they know exactly what they need). This single knob tilts
+# the second possessor's scoring distribution up so an even matchup lands the second
+# team at ~52.5%. Set to 0.0 to disable — e.g. once the aggressiveness ratings
+# absorb this effect behaviorally. Calibrated empirically: 0.17 puts an even
+# matchup's second possessor at ~52.4% (OT1) / ~52.2% (OT2) to win that period.
+# Note: because possession ALTERNATES OT1->OT2, this per-period edge largely
+# cancels over a full game, so the game-level moneyline stays near 50/50 — the
+# edge shows up in the per-period ("OT N result") pricing, which is the intent.
+SECOND_POSSESSOR_EDGE = 0.17
+
 # Points scored by the OFFENSE on a given outcome
 OFFENSE_PTS = {"td_pat": 7, "td_2pt": 8, "td_6": 6, "fg": 3, "turnover": 0, "def_td": 0}
 # Points scored by the DEFENSE (i.e. the non-possessing team) on a given outcome
@@ -293,7 +309,7 @@ def load_model():
 
 def base_drive_probs(strength_delta: float, off_def_tendency: float,
                      down: int = 1, distance: int = 10, yards_to_goal: int = 25,
-                     aggressiveness: float = 0.0) -> dict:
+                     aggressiveness: float = 0.0, ot_period: int = 1) -> dict:
     """
     Returns a drive outcome probability distribution using the trained ML model
     as the base, then applies strength and tendency adjustments on top.
@@ -306,6 +322,10 @@ def base_drive_probs(strength_delta: float, off_def_tendency: float,
                      TD and turnover, and shifts the TD point-split from PAT (7)
                      toward 2pt (8) and missed-PAT (6). Meant for the ACTIVE drive
                      only — leave at 0 for base/future distributions.
+    ot_period        the OT period this drive belongs to. NCAA mandates a 2-pt try
+                     after any TD starting in OT2, so for ot_period >= 2 the 7-pt
+                     PAT outcome is impossible: its mass collapses onto td_2pt
+                     (made, 8) and td_6 (failed, 6) at TWO_PT_BASE_RATE.
     """
     payload = load_model()
     model   = payload["model"]
@@ -383,12 +403,41 @@ def base_drive_probs(strength_delta: float, off_def_tendency: float,
             p["td_2pt"] = td_mass * frac_2pt / s
             p["td_6"]   = td_mass * frac_6   / s
 
+    # Mandatory 2-pt try in OT2+: the 7-pt PAT is not allowed. Collapse all TD mass
+    # onto the two 2-pt outcomes — made (td_2pt, 8) vs failed (td_6, 6) — at the
+    # league 2-pt conversion rate. Runs last so it's the final word on the TD split.
+    if ot_period >= 2:
+        td_mass = p["td_pat"] + p["td_2pt"] + p["td_6"]
+        p["td_pat"] = 0.0
+        p["td_2pt"] = td_mass * TWO_PT_BASE_RATE
+        p["td_6"]   = td_mass * (1 - TWO_PT_BASE_RATE)
+
     total = sum(p.values())
     return {k: v / total for k, v in p.items()}
 
 
+def _apply_second_edge(probs: dict, edge: float | None = None) -> dict:
+    """
+    Tilt a drive distribution toward scoring to represent the second possessor's
+    advantage. Scales TD outcomes up by (1+edge) and FG up slightly, pulling the
+    freed mass out of turnover, then renormalizes. edge=0 returns probs unchanged.
+    Resolves SECOND_POSSESSOR_EDGE at call time (not as a frozen default).
+    """
+    if edge is None:
+        edge = SECOND_POSSESSOR_EDGE
+    if edge <= 0:
+        return probs
+    q = dict(probs)
+    for k in ("td_pat", "td_2pt", "td_6"):
+        q[k] *= (1 + edge)
+    q["fg"] *= (1 + edge * 0.5)
+    total = sum(q.values())
+    return {k: v / total for k, v in q.items()}
+
+
 def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
-                                  first_score: int, second_score: int) -> dict:
+                                  first_score: int, second_score: int,
+                                  second_edge: bool = True) -> dict:
     """
     Enumerate all (first_outcome × second_outcome) combinations for one OT period.
 
@@ -401,7 +450,15 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
 
     Note: both possessions always happen (no walk-off mid-possession in this model).
     Returns P(first wins), P(second wins), P(advance to next OT).
+
+    second_edge: when True (default), the second possessor's distribution is tilted
+    toward scoring via SECOND_POSSESSOR_EDGE to reflect their information advantage.
+    Pass False when the second team's distribution is already known/collapsed (mid-
+    period), so we don't double-apply the edge to a certain outcome.
     """
+    if second_edge:
+        second_probs = _apply_second_edge(second_probs)
+
     p_first = p_second = p_advance = 0.0
 
     for fk, fp in first_probs.items():
@@ -462,7 +519,8 @@ def game_win_probs(away_probs: dict, home_probs: dict,
                    first_possession_logged: bool,
                    period_first_pts: int, period_second_pts: int,
                    future_away_probs: dict | None = None,
-                   future_home_probs: dict | None = None) -> dict:
+                   future_home_probs: dict | None = None,
+                   first_shootout_result: str | None = None) -> dict:
     """
     Compute P(away wins game outright) from the current live state.
 
@@ -490,13 +548,25 @@ def game_win_probs(away_probs: dict, home_probs: dict,
     if future_home_probs is None:
         future_home_probs = home_probs
 
+    # Unconditioned P(away wins | shootout goes to completion) — used as the value
+    # of any FUTURE shootout period in the recursion below. Never condition this on
+    # the current period's known result.
     s_away  = away_succ * (1 - home_succ)
     s_home  = (1 - away_succ) * home_succ
     s_total = s_away + s_home
     p_away_shootout = s_away / s_total if s_total > 0 else 0.5
 
     if current_period >= 3:
-        return {"away_wins": p_away_shootout, "home_wins": 1 - p_away_shootout}
+        first_this = first_team_for_period(current_period, ot1_first)
+        if first_possession_logged and first_shootout_result is not None:
+            # Mid-period: condition on the first possessor's known attempt. An
+            # "advance" (both convert / both miss) rolls into a fresh shootout,
+            # whose away-win value is the unconditioned p_away_shootout.
+            sp = shootout_period_probs(away_succ, home_succ, first_this, first_shootout_result)
+            p_away = sp["away_wins"] + sp["advance"] * p_away_shootout
+        else:
+            p_away = p_away_shootout
+        return {"away_wins": p_away, "home_wins": 1 - p_away}
 
     p_future_away = _p_away_wins_from_period_start(
         current_period + 1, ot1_first, future_away_probs, future_home_probs, p_away_shootout
@@ -520,6 +590,10 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         # second team already has period_second_pts (from a defensive TD if any).
         second_this  = "Home" if first_this == "Away" else "Away"
         second_probs = home_probs if second_this == "Home" else away_probs
+        # Same second-possessor edge as Case B (period_outcome_probs_ordered applies
+        # it internally there; here we enumerate the second team directly, so apply
+        # it explicitly for consistency).
+        second_probs = _apply_second_edge(second_probs)
 
         p_away = 0.0
         for sk, sp_prob in second_probs.items():
@@ -548,12 +622,43 @@ def game_win_probs(away_probs: dict, home_probs: dict,
     return {"away_wins": p_away, "home_wins": p_home}
 
 
-def shootout_period_probs(away_succ: float, home_succ: float) -> dict:
-    p_away = away_succ * (1 - home_succ)
-    p_home = (1 - away_succ) * home_succ
-    p_tie  = away_succ * home_succ + (1 - away_succ) * (1 - home_succ)
-    total  = p_away + p_home + p_tie
-    return {"away_wins": p_away/total, "home_wins": p_home/total, "advance": p_tie/total}
+def shootout_period_probs(away_succ: float, home_succ: float,
+                          first_this: str | None = None,
+                          first_result: str | None = None) -> dict:
+    """
+    Closed-form P(away wins / home wins / advance) for one 2-pt shootout period.
+
+    Start of period (first_this / first_result not supplied): enumerate both
+    attempts. Mid-period (first possessor's attempt already logged, first_result
+    is "Success"/"Failure"): condition on that known result so the price actually
+    moves when the first team goes.
+    """
+    if first_this is None or first_result is None:
+        p_away = away_succ * (1 - home_succ)
+        p_home = (1 - away_succ) * home_succ
+        p_tie  = away_succ * home_succ + (1 - away_succ) * (1 - home_succ)
+        total  = p_away + p_home + p_tie
+        return {"away_wins": p_away/total, "home_wins": p_home/total, "advance": p_tie/total}
+
+    # ── Mid-period: the first possessor's attempt is known ──
+    second_this = "Home" if first_this == "Away" else "Away"
+    second_succ = away_succ if second_this == "Away" else home_succ
+    first_scored = (first_result == "Success")
+
+    if first_scored:
+        # Second team must convert to tie (→ advance); a miss hands the first team the win.
+        p_first_wins  = 1 - second_succ
+        p_second_wins = 0.0
+        p_advance     = second_succ
+    else:
+        # First team missed: second converting wins outright; a miss advances (0-0).
+        p_first_wins  = 0.0
+        p_second_wins = second_succ
+        p_advance     = 1 - second_succ
+
+    if first_this == "Away":
+        return {"away_wins": p_first_wins, "home_wins": p_second_wins, "advance": p_advance}
+    return {"away_wins": p_second_wins, "home_wins": p_first_wins, "advance": p_advance}
 
 
 def game_length_table(away_probs: dict, home_probs: dict,
@@ -649,10 +754,45 @@ def init_state():
         # Needed for mid-period probability calculations. Always in "first possessor's frame".
         "period_first_pts":        0,
         "period_second_pts":       0,
+        # Undo stack — snapshots of the core game state pushed before each logged play.
+        "undo_stack":              [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+# ── undo support ─────────────────────────────────────────────────────────────
+# The single source of truth for which session keys constitute the "game state"
+# that an undo must restore. Transient field-position widgets (field_position,
+# down_select, etc.) are intentionally NOT snapshotted — they're cleared on undo
+# so the sidebar reverts to 1st & 10 from the 25, matching a fresh possession.
+UNDO_KEYS = (
+    "ot_period", "away_score", "home_score", "ot_history",
+    "first_possession_logged", "first_possession_key", "pending_td",
+    "period_first_pts", "period_second_pts",
+)
+# Transient live-drive widget keys wiped on undo so field position resets cleanly.
+_TRANSIENT_KEYS = ("field_position", "down_select", "distance_input",
+                   "prev_ytg", "cur_down", "cur_dist")
+
+
+def push_undo():
+    """Snapshot the current game state onto the undo stack before a mutating play."""
+    import copy
+    snap = {k: copy.deepcopy(st.session_state[k]) for k in UNDO_KEYS if k in st.session_state}
+    st.session_state.undo_stack.append(snap)
+
+
+def pop_undo():
+    """Restore the most recent snapshot and clear transient field widgets."""
+    if not st.session_state.undo_stack:
+        return
+    snap = st.session_state.undo_stack.pop()
+    for k, v in snap.items():
+        st.session_state[k] = v
+    for k in _TRANSIENT_KEYS:
+        st.session_state.pop(k, None)
 
 
 # ── sidebar ────────────────────────────────────────────────────────────────────
@@ -870,9 +1010,11 @@ def render_sidebar() -> dict:
         sb1, sb2 = st.sidebar.columns(2)
         with sb1:
             if st.button("✓ Success", key="btn_success", use_container_width=True):
+                push_undo()
                 _log_shootout("Success")
         with sb2:
             if st.button("✗ Failure", key="btn_failure", use_container_width=True):
+                push_undo()
                 _log_shootout("Failure")
 
         field_position = down = distance = None
@@ -1001,34 +1143,65 @@ def render_sidebar() -> dict:
         st.sidebar.markdown(btn_css, unsafe_allow_html=True)
 
         if st.session_state.pending_td:
-            # ── TD scored — choose the try: +2 (2pt), +1 (PAT), +0 (missed) ──
-            st.sidebar.markdown(
-                f"<div style='font-size:0.8rem;color:#aaa;margin:2px 0 4px 0;'>"
-                f"<strong style='color:#fff;'>{ball_team}</strong> scored a TD — the try:</div>",
-                unsafe_allow_html=True,
-            )
-            pb1, pb2, pb3 = st.sidebar.columns(3)
-            with pb1:
-                if st.button("+2", key="btn_pat2", use_container_width=True):
-                    _log_result("td_2pt")   # 8 pts
-            with pb2:
-                if st.button("+1", key="btn_pat1", use_container_width=True):
-                    _log_result("td_pat")   # 7 pts
-            with pb3:
-                if st.button("+0", key="btn_pat0", use_container_width=True):
-                    _log_result("td_6")     # 6 pts
+            # NCAA mandates a 2-pt try after a TD starting in OT2 — no 1-pt PAT.
+            mandatory_2pt = ot_period >= 2
+            if mandatory_2pt:
+                # ── TD scored in OT2+ — the try is 2-pt only: +2 (made) / +0 (failed) ──
+                st.sidebar.markdown(
+                    f"<div style='font-size:0.8rem;color:#aaa;margin:2px 0 4px 0;'>"
+                    f"<strong style='color:#fff;'>{ball_team}</strong> scored a TD — mandatory 2-pt try:</div>",
+                    unsafe_allow_html=True,
+                )
+                pb1, pb2 = st.sidebar.columns(2)
+                with pb1:
+                    if st.button("+2", key="btn_pat2", use_container_width=True):
+                        _log_result("td_2pt")   # 8 pts
+                with pb2:
+                    if st.button("+0", key="btn_pat0", use_container_width=True):
+                        _log_result("td_6")     # 6 pts
+            else:
+                # ── TD scored in OT1 — choose the try: +2 (2pt), +1 (PAT), +0 (missed) ──
+                st.sidebar.markdown(
+                    f"<div style='font-size:0.8rem;color:#aaa;margin:2px 0 4px 0;'>"
+                    f"<strong style='color:#fff;'>{ball_team}</strong> scored a TD — the try:</div>",
+                    unsafe_allow_html=True,
+                )
+                pb1, pb2, pb3 = st.sidebar.columns(3)
+                with pb1:
+                    if st.button("+2", key="btn_pat2", use_container_width=True):
+                        _log_result("td_2pt")   # 8 pts
+                with pb2:
+                    if st.button("+1", key="btn_pat1", use_container_width=True):
+                        _log_result("td_pat")   # 7 pts
+                with pb3:
+                    if st.button("+0", key="btn_pat0", use_container_width=True):
+                        _log_result("td_6")     # 6 pts
         else:
             b1, b2, b3 = st.sidebar.columns(3)
             with b1:
                 if st.button("TD", key="btn_td", use_container_width=True):
+                    # Snapshot BEFORE entering the pending-TD state so a single undo
+                    # reverts the whole play (TD press + try choice). The +2/+1/+0
+                    # try buttons deliberately do NOT push again.
+                    push_undo()
                     st.session_state.pending_td = True
                     st.rerun()
             with b2:
                 if st.button("FG", key="btn_fg", use_container_width=True):
+                    push_undo()
                     _log_result("fg")
             with b3:
                 if st.button("TO", key="btn_to", use_container_width=True):
+                    push_undo()
                     _log_result("turnover")
+
+    # ── Undo last play ──
+    undo_n = len(st.session_state.get("undo_stack", []))
+    if st.sidebar.button(f"↩ Undo last play{f'  ({undo_n})' if undo_n else ''}",
+                         key="undo_btn", use_container_width=True,
+                         disabled=(undo_n == 0)):
+        pop_undo()
+        st.rerun()
 
     # Full Reset
     st.sidebar.markdown(
@@ -1104,11 +1277,17 @@ def render_main(inputs: dict):
     live_ytg        = inputs.get("field_position", 25) if inputs.get("field_position") else 25
 
     # Base distributions — OT start defaults (1st & 10 from 25).
-    # Used for all forward-looking math (game win, future periods, game length table).
-    away_probs_base = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25)
-    home_probs_base = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25)
-    away_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 + strength_delta * 0.1))
-    home_succ  = max(0.1, min(0.9, 0.47 + off_def_tendency * 0.1 - strength_delta * 0.1))
+    # Used ONLY for forward-looking math (future periods in the game-win recursion
+    # and the game-length table) — never the current period. The only future
+    # STANDARD period is OT2 (period 3+ is always the shootout, which ignores these),
+    # and OT2 mandates a 2-pt try, so build these at ot_period=2 so the mandatory-2pt
+    # TD split is baked into every future standard period.
+    away_probs_base = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25, ot_period=2)
+    home_probs_base = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, ot_period=2)
+    # Shootout 2-pt success rates — anchored on the same league base as the
+    # mandatory-2pt TD split (TWO_PT_BASE_RATE), then nudged by tendency/strength.
+    away_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 + strength_delta * 0.1))
+    home_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 - strength_delta * 0.1))
 
     # Live distributions — both teams' CURRENT-period drives. Each team always
     # carries its OWN aggressiveness (it's a team property for this period, and both
@@ -1126,11 +1305,11 @@ def render_main(inputs: dict):
             ball_side = "Home" if first_this_live == "Away" else "Away"
 
         if ball_side == "Away":
-            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr)
-            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, home_aggr)
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr, ot_period=ot_period)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, home_aggr, ot_period=ot_period)
         else:
-            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25, away_aggr)
-            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr)
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25, away_aggr, ot_period=ot_period)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr, ot_period=ot_period)
     else:
         away_probs_live = dict(away_probs_base)
         home_probs_live = dict(home_probs_base)
@@ -1185,6 +1364,8 @@ def render_main(inputs: dict):
         st.session_state.get("period_second_pts", 0),
         future_away_probs=away_probs_base,
         future_home_probs=home_probs_base,
+        first_shootout_result=(st.session_state.first_possession_key
+                               if is_shootout and first_possession_logged else None),
     )
     away_win_p = gw["away_wins"]
     home_win_p = gw["home_wins"]
@@ -1328,7 +1509,11 @@ def render_main(inputs: dict):
     # ── Period outcome (compute here so game length table can reuse it) ──
     first_this = first_team_for_period(ot_period, ot1_first)
     if is_shootout:
-        period_probs = shootout_period_probs(away_succ, home_succ)
+        if first_possession_logged:
+            period_probs = shootout_period_probs(
+                away_succ, home_succ, first_this, st.session_state.first_possession_key)
+        else:
+            period_probs = shootout_period_probs(away_succ, home_succ)
     else:
         fp = away_probs if first_this == "Away" else home_probs
         sp = home_probs if first_this == "Away" else away_probs
