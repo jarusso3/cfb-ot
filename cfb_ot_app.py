@@ -737,12 +737,12 @@ def prob_to_american(p: float) -> str:
     return f"+{round(((1 - p) / p) * 100)}"
 
 
-# Moneyline margin. A balanced (50/50) market is priced -115/-115 — a standard
-# 30-cent line. -115 implies 115/215 ≈ 53.49%, so the overround added to EACH side
-# is that minus 0.5. We add this evenly to both fair probabilities to get the
-# marginated (customer-facing) price; the raw fair prob/odds are shown alongside.
-BALANCED_JUICE  = 115
-MARGIN_PER_SIDE = BALANCED_JUICE / (BALANCED_JUICE + 100) - 0.5   # ≈ 0.0349
+# Moneyline margin. Target a flat OVERROUND (total book %) added evenly to both
+# sides: half to each. At 3% overround a balanced (50/50) market prices to ~-103/-103
+# and the two sides' implied probs sum to ~1.03. The raw fair prob/odds are shown
+# alongside the marginated (customer-facing) price.
+TARGET_OVERROUND = 0.03
+MARGIN_PER_SIDE  = TARGET_OVERROUND / 2   # 1.5% added to each side
 
 
 def marginate_prob(p: float, margin: float = MARGIN_PER_SIDE) -> float:
