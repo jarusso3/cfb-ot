@@ -738,11 +738,11 @@ def prob_to_american(p: float) -> str:
 
 
 # Moneyline margin. Target a flat OVERROUND (total book %) added evenly to both
-# sides: half to each. At 3% overround a balanced (50/50) market prices to ~-103/-103
-# and the two sides' implied probs sum to ~1.03. The raw fair prob/odds are shown
+# sides: half to each. At 6% overround a balanced (50/50) market prices to ~-113/-113
+# and the two sides' implied probs sum to ~1.06. The raw fair prob/odds are shown
 # alongside the marginated (customer-facing) price.
-TARGET_OVERROUND = 0.03
-MARGIN_PER_SIDE  = TARGET_OVERROUND / 2   # 1.5% added to each side
+TARGET_OVERROUND = 0.06
+MARGIN_PER_SIDE  = TARGET_OVERROUND / 2   # 3% added to each side
 
 
 def marginate_prob(p: float, margin: float = MARGIN_PER_SIDE) -> float:
