@@ -737,6 +737,19 @@ def prob_to_american(p: float) -> str:
     return f"+{round(((1 - p) / p) * 100)}"
 
 
+# Moneyline margin. A balanced (50/50) market is priced -115/-115 — a standard
+# 30-cent line. -115 implies 115/215 ≈ 53.49%, so the overround added to EACH side
+# is that minus 0.5. We add this evenly to both fair probabilities to get the
+# marginated (customer-facing) price; the raw fair prob/odds are shown alongside.
+BALANCED_JUICE  = 115
+MARGIN_PER_SIDE = BALANCED_JUICE / (BALANCED_JUICE + 100) - 0.5   # ≈ 0.0349
+
+
+def marginate_prob(p: float, margin: float = MARGIN_PER_SIDE) -> float:
+    """Add flat margin to a fair win probability, clamped to a valid range."""
+    return min(0.9999, max(0.0001, p + margin))
+
+
 # ── session state init ─────────────────────────────────────────────────────────
 
 def init_state():
@@ -1377,8 +1390,11 @@ def render_main(inputs: dict):
     away_win_p = gw["away_wins"]
     home_win_p = gw["home_wins"]
 
-    ml_a = prob_to_american(away_win_p)
-    ml_h = prob_to_american(home_win_p)
+    # Big number = marginated (customer-facing) price; small line = fair % + fair odds.
+    ml_a = prob_to_american(marginate_prob(away_win_p))
+    ml_h = prob_to_american(marginate_prob(home_win_p))
+    fair_a = prob_to_american(away_win_p)
+    fair_h = prob_to_american(home_win_p)
 
     away_abbr = team_abbr(away_team)
     home_abbr = team_abbr(home_team)
@@ -1393,7 +1409,7 @@ def render_main(inputs: dict):
               <div style="color:{away_fg};font-size:0.85rem;font-weight:600;opacity:0.85;">AWAY</div>
               <div style="color:{away_fg};font-size:1.25rem;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{away_team}</div>
               <div style="color:{away_fg};font-size:2.4rem;font-weight:900;line-height:1.1;">{ml_a}</div>
-              <div style="color:{away_fg};font-size:0.85rem;opacity:0.85;">{away_win_p:.1%} to win</div>
+              <div style="color:{away_fg};font-size:0.85rem;opacity:0.85;">{away_win_p:.1%} to win ({fair_a})</div>
             </td>
             <td style="background:#1a1a1a;border-radius:10px;padding:10px 6px;text-align:center;vertical-align:middle;">
               <div style="color:#aaa;font-size:0.7rem;font-weight:600;letter-spacing:0.08em;">CFB OT PRICER</div>
@@ -1404,7 +1420,7 @@ def render_main(inputs: dict):
               <div style="color:{home_fg};font-size:0.85rem;font-weight:600;opacity:0.85;">HOME</div>
               <div style="color:{home_fg};font-size:1.25rem;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">{home_team}</div>
               <div style="color:{home_fg};font-size:2.4rem;font-weight:900;line-height:1.1;">{ml_h}</div>
-              <div style="color:{home_fg};font-size:0.85rem;opacity:0.85;">{home_win_p:.1%} to win</div>
+              <div style="color:{home_fg};font-size:0.85rem;opacity:0.85;">{home_win_p:.1%} to win ({fair_h})</div>
             </td>
           </tr>
         </table>
