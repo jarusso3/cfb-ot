@@ -52,14 +52,15 @@ TWO_PT_BASE_RATE = 0.45
 
 # Second-possessor edge. The team that possesses SECOND in a given OT has an
 # information advantage (they know exactly what they need). This single knob tilts
-# the second possessor's scoring distribution up so an even matchup lands the second
-# team at ~52.5%. Set to 0.0 to disable — e.g. once the aggressiveness ratings
-# absorb this effect behaviorally. Calibrated empirically: 0.17 puts an even
-# matchup's second possessor at ~52.4% (OT1) / ~52.2% (OT2) to win that period.
-# Note: because possession ALTERNATES OT1->OT2, this per-period edge largely
-# cancels over a full game, so the game-level moneyline stays near 50/50 — the
-# edge shows up in the per-period ("OT N result") pricing, which is the intent.
-SECOND_POSSESSOR_EDGE = 0.17
+# the second possessor's scoring distribution up on top of any structural edge.
+#
+# As of the deficit-aware second-team model (rational_second_probs), that advantage
+# is now EARNED structurally — a trailing team stops kicking dominated FGs and picks
+# the right TD try — which on its own puts an even matchup's second possessor at
+# ~54.2% (OT1) / ~53.2% (OT2) to win that period. So this artificial knob is set to
+# 0.0 to avoid double-counting; leave it as a tunable if we ever want to nudge the
+# per-period edge further. (Was 0.17 before the model earned the edge on its own.)
+SECOND_POSSESSOR_EDGE = 0.0
 
 # Points scored by the OFFENSE on a given outcome
 OFFENSE_PTS = {"td_pat": 7, "td_2pt": 8, "td_6": 6, "fg": 3, "turnover": 0, "def_td": 0}
@@ -435,9 +436,64 @@ def _apply_second_edge(probs: dict, edge: float | None = None) -> dict:
     return {k: v / total for k, v in q.items()}
 
 
+def rational_second_probs(base: dict, deficit: int, ot_period: int = 1) -> dict:
+    """
+    Re-condition the SECOND possessor's drive distribution on the score they face.
+
+    Unlike the first team (who plays blind), the second team knows exactly what they
+    need. `deficit` = first team's within-period points minus what the second team
+    already has (from a defensive TD). Possible values: 8, 7, 6, 3, 0, or -6.
+
+    Two rational adjustments:
+      1. Dominated field goal. A FG scores 3. If the second team trails by MORE than
+         3 (deficit 6/7/8) a FG can't tie or win — no rational team kicks it. Strip
+         that FG mass and model going for it on 4th down instead: 40% converts (to a
+         TD, spread across the existing TD split) and 60% fails (turnover). At
+         deficit 3 the FG ties (→ advance) and at deficit ≤ 0 it wins, so it's kept.
+      2. Rational TD try (only pre-OT2 — OT2+ base already forces the mandatory 2pt):
+           deficit 8 → must convert 2pt to tie: TD mass → td_2pt/td_6 at TWO_PT_BASE_RATE
+           deficit 7 → kick PAT to tie: TD mass → td_pat
+           deficit 6 → kick PAT to win: TD mass → td_pat
+           deficit 0/3/≤0 → any TD wins or leads, keep the normal split.
+    """
+    q = dict(base)
+    td_keys = ("td_pat", "td_2pt", "td_6")
+
+    # 1) Suppress a dominated field goal (trailing by more than a FG can recover).
+    if deficit > 3 and q.get("fg", 0) > 0:
+        fg_mass = q["fg"]
+        q["fg"] = 0.0
+        td_before = sum(q[k] for k in td_keys)
+        td_gain = fg_mass * 0.40
+        if td_before > 0:
+            for k in td_keys:
+                q[k] += td_gain * (q[k] / td_before)
+        else:
+            q["td_2pt"] += td_gain
+        q["turnover"] += fg_mass * 0.60
+
+    # 2) Rational TD point-split by deficit (OT2+ already mandatory-2pt in base).
+    if ot_period < 2:
+        td_mass = sum(q[k] for k in td_keys)
+        if td_mass > 0:
+            if deficit == 8:
+                q["td_pat"] = 0.0
+                q["td_2pt"] = td_mass * TWO_PT_BASE_RATE
+                q["td_6"]   = td_mass * (1 - TWO_PT_BASE_RATE)
+            elif deficit in (6, 7):
+                # Kick the PAT (wins when down 6, ties when down 7).
+                q["td_pat"] = td_mass
+                q["td_2pt"] = 0.0
+                q["td_6"]   = 0.0
+
+    total = sum(q.values())
+    return {k: v / total for k, v in q.items()}
+
+
 def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
                                   first_score: int, second_score: int,
-                                  second_edge: bool = True) -> dict:
+                                  second_edge: bool = True,
+                                  ot_period: int = 1) -> dict:
     """
     Enumerate all (first_outcome × second_outcome) combinations for one OT period.
 
@@ -455,6 +511,14 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
     toward scoring via SECOND_POSSESSOR_EDGE to reflect their information advantage.
     Pass False when the second team's distribution is already known/collapsed (mid-
     period), so we don't double-apply the edge to a certain outcome.
+
+    ot_period: passed through to rational_second_probs so the deficit-aware TD split
+    respects the OT2+ mandatory-2pt rule.
+
+    Rational second team: for each first-team outcome we know the exact deficit the
+    second team faces, so their distribution is re-conditioned (dominated FGs
+    suppressed, TD try chosen for the situation) before enumerating. This is what
+    keeps a trailing team from "kicking a field goal that guarantees a loss".
     """
     if second_edge:
         second_probs = _apply_second_edge(second_probs)
@@ -466,7 +530,11 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
         f_score_mid = first_score  + OFFENSE_PTS[fk]   # first team offense
         s_score_mid = second_score + DEFENSE_PTS[fk]   # second team defense (DefTD)
 
-        for sk, sp in second_probs.items():
+        # Re-condition the second team on the deficit they now face.
+        deficit = f_score_mid - s_score_mid
+        cond_second = rational_second_probs(second_probs, deficit, ot_period)
+
+        for sk, sp in cond_second.items():
             # After second team's possession
             final_first  = f_score_mid + DEFENSE_PTS[sk]   # first team defense (DefTD)
             final_second = s_score_mid + OFFENSE_PTS[sk]   # second team offense
@@ -503,7 +571,7 @@ def _p_away_wins_from_period_start(period: int, ot1_first: str,
     sp = home_probs if first_this == "Away" else away_probs
 
     # Scores always tied at start of each OT period
-    outcome = period_outcome_probs_ordered(fp, sp, 0, 0)
+    outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=period)
     p_future = _p_away_wins_from_period_start(period + 1, ot1_first,
                                                away_probs, home_probs, p_away_shootout)
 
@@ -578,7 +646,7 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         # ── Case B: start of period, within-period scores both 0 ──
         fp = away_probs if first_this == "Away" else home_probs
         sp = home_probs if first_this == "Away" else away_probs
-        outcome = period_outcome_probs_ordered(fp, sp, 0, 0)
+        outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=current_period)
         if first_this == "Away":
             p_away = outcome["first_wins"] + outcome["advance"] * p_future_away
         else:
@@ -592,8 +660,11 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         second_probs = home_probs if second_this == "Home" else away_probs
         # Same second-possessor edge as Case B (period_outcome_probs_ordered applies
         # it internally there; here we enumerate the second team directly, so apply
-        # it explicitly for consistency).
+        # it explicitly for consistency), then re-condition on the KNOWN deficit so a
+        # trailing team doesn't kick a losing FG.
         second_probs = _apply_second_edge(second_probs)
+        deficit = period_first_pts - period_second_pts
+        second_probs = rational_second_probs(second_probs, deficit, current_period)
 
         p_away = 0.0
         for sk, sp_prob in second_probs.items():
@@ -682,7 +753,7 @@ def game_length_table(away_probs: dict, home_probs: dict,
             first_this = first_team_for_period(period, ot1_first)
             fp = away_probs if first_this == "Away" else home_probs
             sp = home_probs if first_this == "Away" else away_probs
-            raw = period_outcome_probs_ordered(fp, sp, 0, 0)
+            raw = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=period)
             outcome = {"away_wins": raw["first_wins"] if first_this == "Away" else raw["second_wins"],
                        "home_wins": raw["second_wins"] if first_this == "Away" else raw["first_wins"],
                        "advance": raw["advance"]}
@@ -785,9 +856,9 @@ UNDO_KEYS = (
     "first_possession_logged", "first_possession_key", "pending_td",
     "period_first_pts", "period_second_pts",
 )
-# Transient live-drive widget keys wiped on undo so field position resets cleanly.
-_TRANSIENT_KEYS = ("field_position", "down_select", "distance_input",
-                   "prev_ytg", "cur_down", "cur_dist")
+# Transient live-drive widget keys wiped on undo so the field situation re-seeds
+# to 1st & 10 from the 25 cleanly.
+_TRANSIENT_KEYS = ("field_position", "down_select", "distance_input")
 
 
 def push_undo():
@@ -806,6 +877,24 @@ def pop_undo():
         st.session_state[k] = v
     for k in _TRANSIENT_KEYS:
         st.session_state.pop(k, None)
+
+
+def reset_field_widgets():
+    """
+    Snap the field-position slider, down, and distance back to 1st & 10 from the 25
+    for the next possession.
+
+    MUST run as a button on_click CALLBACK: Streamlit only lets us change these
+    widget-backed keys before the widgets are instantiated on the next rerun. Setting
+    them from the normal script body — after the widgets already rendered — is
+    silently ignored, which is why the old reset-via-key-deletion never took effect.
+
+    All three are pure state-driven widgets (no positional/index/value default), so we
+    set their keys directly here and they render at the new values on the next run.
+    """
+    st.session_state["field_position"] = 25
+    st.session_state["down_select"]    = "1st"
+    st.session_state["distance_input"] = 10
 
 
 # ── sidebar ────────────────────────────────────────────────────────────────────
@@ -1046,37 +1135,29 @@ def render_sidebar() -> dict:
         off_bg    = team_color(ball_team)
         off_fg    = text_color(off_bg)
 
-        # ── Field position slider (0-40 yds from end zone) ──
-        prev_ytg = st.session_state.get("prev_ytg", 25)
-        field_position = st.sidebar.slider(
-            "Field Position (yds from end zone)", 0, 40, 25, key="field_position",
-        )
-        yards_gained = prev_ytg - field_position
-        st.session_state["prev_ytg"] = field_position
-
-        # Auto-advance down/distance based on movement
-        cur_down = st.session_state.get("cur_down", 1)
-        cur_dist = st.session_state.get("cur_dist", 10)
-        if yards_gained > 0:
-            if yards_gained >= cur_dist:
-                cur_down = 1
-                cur_dist = 10
-            else:
-                cur_down = min(cur_down + 1, 4)
-                cur_dist = cur_dist - yards_gained
-        st.session_state["cur_down"] = cur_down
-        st.session_state["cur_dist"] = cur_dist
-
-        # ── Down & Distance side by side ──
+        # ── Field position / down / distance — all pure state-driven ──
+        # Each widget is seeded in session_state and takes NO positional/index/value
+        # default, so it is driven purely by its key. This is what lets
+        # reset_field_widgets() snap all three back to 1st & 10 from the 25 via the
+        # button callback (the delete-the-key trick was unreliable for the selectbox
+        # and number_input). Manual overrides still stick until the next logged play.
         down_opts = ["1st", "2nd", "3rd", "4th"]
+        if "field_position" not in st.session_state:
+            st.session_state["field_position"] = 25
+        if "down_select" not in st.session_state:
+            st.session_state["down_select"] = "1st"
+        if "distance_input" not in st.session_state:
+            st.session_state["distance_input"] = 10
+
+        field_position = st.sidebar.slider(
+            "Field Position (yds from end zone)", 0, 40, key="field_position",
+        )
+
         dc1, dc2 = st.sidebar.columns(2)
         with dc1:
-            down = st.selectbox("Down", down_opts, index=cur_down - 1, key="down_select")
+            down = st.selectbox("Down", down_opts, key="down_select")
         with dc2:
-            distance = st.number_input("Dist", min_value=1, max_value=40, value=int(cur_dist), key="distance_input")
-        # Keep session vars in sync if user manually overrides
-        st.session_state["cur_down"] = down_opts.index(down) + 1
-        st.session_state["cur_dist"] = int(distance)
+            distance = st.number_input("Dist", min_value=1, max_value=40, key="distance_input")
 
         # ── Show first team result if already logged ──
         if st.session_state.first_possession_logged:
@@ -1099,7 +1180,10 @@ def render_sidebar() -> dict:
         def _log_result(outcome_key):
             off = OFFENSE_PTS[outcome_key]
             dfd = DEFENSE_PTS[outcome_key]
-            reset_keys = ("field_position", "down_select", "distance_input", "prev_ytg", "cur_down", "cur_dist")
+            # Deleting the pure state-driven widget keys here + the st.rerun() below
+            # re-seeds them to 1st & 10 from the 25. This covers the pending-TD try
+            # buttons (+2/+1/+0), which finalize a play without the on_click callback.
+            reset_keys = ("field_position", "down_select", "distance_input")
             st.session_state.pending_td = False  # PAT try resolved (or non-TD outcome)
             if not st.session_state.first_possession_logged:
                 if first_this == "Away":
@@ -1197,9 +1281,14 @@ def render_sidebar() -> dict:
                     if st.button("+0", key="btn_pat0", use_container_width=True):
                         _log_result("td_6")     # 6 pts
         else:
+            # on_click=reset_field_widgets snaps the field slider / down / distance back
+            # to 1st & 10 from the 25 for the next possession. It runs as a callback
+            # (before the next rerun instantiates the widgets) — the only point Streamlit
+            # lets us rewrite those widget-backed keys.
             b1, b2, b3 = st.sidebar.columns(3)
             with b1:
-                if st.button("TD", key="btn_td", use_container_width=True):
+                if st.button("TD", key="btn_td", use_container_width=True,
+                             on_click=reset_field_widgets):
                     # Snapshot BEFORE entering the pending-TD state so a single undo
                     # reverts the whole play (TD press + try choice). The +2/+1/+0
                     # try buttons deliberately do NOT push again.
@@ -1207,17 +1296,19 @@ def render_sidebar() -> dict:
                     st.session_state.pending_td = True
                     st.rerun()
             with b2:
-                if st.button("FG", key="btn_fg", use_container_width=True):
+                if st.button("FG", key="btn_fg", use_container_width=True,
+                             on_click=reset_field_widgets):
                     push_undo()
                     _log_result("fg")
             with b3:
-                if st.button("TO", key="btn_to", use_container_width=True):
+                if st.button("TO", key="btn_to", use_container_width=True,
+                             on_click=reset_field_widgets):
                     push_undo()
                     _log_result("turnover")
 
-    # ── Undo last play ──
+    # ── Undo last scoring play ──
     undo_n = len(st.session_state.get("undo_stack", []))
-    if st.sidebar.button(f"↩ Undo last play{f'  ({undo_n})' if undo_n else ''}",
+    if st.sidebar.button(f"↩ Undo last scoring play{f'  ({undo_n})' if undo_n else ''}",
                          key="undo_btn", use_container_width=True,
                          disabled=(undo_n == 0)):
         pop_undo()
@@ -1236,8 +1327,6 @@ def render_sidebar() -> dict:
                          "off_def_tendency", "ot1_first_radio",
                          "away_aggr", "home_aggr"):
                 del st.session_state[k]
-        for k in ("prev_ytg", "cur_down", "cur_dist"):
-            st.session_state.pop(k, None)
         st.rerun()
 
     # ── OT History (bottom) ──
@@ -1306,8 +1395,11 @@ def render_main(inputs: dict):
     home_probs_base = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, ot_period=2)
     # Shootout 2-pt success rates — anchored on the same league base as the
     # mandatory-2pt TD split (TWO_PT_BASE_RATE), then nudged by tendency/strength.
-    away_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 + strength_delta * 0.1))
-    home_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 - strength_delta * 0.1))
+    # Strength coefficient is deliberately small (0.05): a single 2-pt play is
+    # high-variance and near coin-flip, so team strength should move the OT3+
+    # shootout ML far less than it moves a full-drive OT (Kyle: GT +162 was too long).
+    away_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 + strength_delta * 0.05))
+    home_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 - strength_delta * 0.05))
 
     # Live distributions — both teams' CURRENT-period drives. Each team always
     # carries its OWN aggressiveness (it's a team property for this period, and both
@@ -1341,10 +1433,16 @@ def render_main(inputs: dict):
     if first_possession_logged and not is_shootout:
         first_key = st.session_state.first_possession_key
         collapsed = {k: (1.0 if k == first_key else 0.0) for k in OUTCOME_LABELS}
+        # Re-condition the SECOND team's pie on the deficit they now face, so the
+        # chart matches the price (e.g. no field-goal slice when a FG can't tie/win).
+        deficit = (st.session_state.get("period_first_pts", 0)
+                   - st.session_state.get("period_second_pts", 0))
         if inputs["first_this"] == "Away":
             away_probs = collapsed
+            home_probs = rational_second_probs(home_probs, deficit, ot_period)
         else:
             home_probs = collapsed
+            away_probs = rational_second_probs(away_probs, deficit, ot_period)
 
     # TD pending — the ball team has scored a TD but the try (+2/+1/+0) isn't chosen
     # yet. Converge that team's distribution onto the three TD point totals (6/7/8),
@@ -1540,7 +1638,7 @@ def render_main(inputs: dict):
     else:
         fp = away_probs if first_this == "Away" else home_probs
         sp = home_probs if first_this == "Away" else away_probs
-        raw = period_outcome_probs_ordered(fp, sp, 0, 0)
+        raw = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=ot_period)
         period_probs = {
             "away_wins": raw["first_wins"]  if first_this == "Away" else raw["second_wins"],
             "home_wins": raw["second_wins"] if first_this == "Away" else raw["first_wins"],
