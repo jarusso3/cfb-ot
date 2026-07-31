@@ -61,6 +61,56 @@ v0.1 Changelog
 - No scipy, no external data files; only stdlib + streamlit + altair + pandas.
 - Run with: streamlit run cfb_ot_app.py
 
+Fixed — 2026-07-31  (commit 6a58b3d)
+------------------------------------
+Round of Kyle's playtest feedback (ran the 2024 Georgia-Georgia Tech game). Three
+distinct pieces, all verified via AppTest + pure-fn tests and reviewed on a local
+host before push.
+
+1. Rational trailing team (Kyle's core find). A team that scored first left a large
+   chunk of the SECOND team's distribution in "FG" — but a trailing team would never
+   kick a FG that guarantees a loss, and the model was pricing the leader absurdly
+   short (esp. after a first-team 2pt). Approach B (structural), chosen with JA:
+   - New helper rational_second_probs(base, deficit, ot_period). Deficit = first
+     team's within-period pts minus what the 2nd team already has. Logic:
+       * FG dominated (deficit 6/7/8): strip fg mass, model go-for-it (40% -> TD
+         split, 60% -> turnover). Deficit 3 keeps FG (ties -> advance); <=0 keeps it.
+       * TD try by deficit (pre-OT2): 8 -> must go for 2 (td_2pt/td_6 at
+         TWO_PT_BASE_RATE); 7 -> kick PAT to tie (JA's call); 6 -> kick PAT to win;
+         0/3 -> normal split. OT2+ mandatory-2pt already overrides in base.
+   - Wired into period_outcome_probs_ordered (re-conditions the 2nd team for EACH
+     first-team outcome), so current period + future periods + recursion + game-
+     length table are all consistent. Also game_win_probs Case C (keyed on the
+     logged first result) and the 2nd team's DISPLAY pie (chart matches price — no
+     FG slice when trailing by >3).
+   - SECOND_POSSESSOR_EDGE dropped 0.17 -> 0.0. The rational-play model now EARNS the
+     second-mover edge structurally (~54.2% OT1 / ~53.2% OT2 even matchup), so the
+     old artificial knob was double-counting (pushed it to ~57%). Kept as a tunable.
+   - Verified: OT1 first-team TD+PAT -> Home pie FG=0, leader ~-217 (was far longer);
+     first-team TD+2pt -> leader ~-604; deficit unit tests pass for 0/3/6/7/8.
+
+2. OT3+ shootout strength calibration (Kyle: GT +162 too long once at dueling 2pts).
+   Halved the shootout strength coefficient in away_succ/home_succ (strength_delta
+   0.10 -> 0.05). A single 2pt play is near coin-flip, so strength should move the
+   shootout ML far less than a full-drive OT. Max-strength favorite ~-150 (was ~-227).
+
+3. Field position / down / distance reset on a new possession. The prior "reset" via
+   key-deletion INSIDE _log_result ran AFTER the widgets rendered, so Streamlit
+   ignored it — nothing actually reset (this is why the earlier "already works" claim
+   didn't hold up live). Fix: all three are now pure state-driven widgets (no
+   positional/index/value default). reset_field_widgets() (a button on_click CALLBACK
+   — fires before the next rerun instantiates widgets) snaps them to 1st & 10 from the
+   25 on TD/FG/TO; the pending-TD try buttons (+2/+1/+0) reset via key-delete + rerun.
+   Retired the unused prev_ytg/cur_down/cur_dist auto-advance plumbing. Undo button
+   renamed "Undo last scoring play".
+
+Kyle feedback NOT actioned (by JA's direction):
+- UI 25-yd marker / full auto-reset niceties — not a priority; may not be feasible.
+- 2OT wheel still shows a TD+PAT slice at 0% — not a problem on JA's end, left alone.
+- Down/distance AUTO-advance as the slider drags never worked; deprioritized. NOTE:
+  the auto-advance plumbing was REMOVED in fix #3 above (widgets are now purely
+  manual + reset-on-play), so if we ever want auto-advance back it's a rebuild.
+
 Fixed — 2026-07-21  (commit 72138a5)
 ------------------------------------
 Four items from the 7/20 notes, all verified end-to-end (pure-fn tests + Streamlit
