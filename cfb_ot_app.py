@@ -1020,7 +1020,7 @@ def render_sidebar() -> dict:
             unsafe_allow_html=True,
         )
         away_aggr = st.slider(
-            "Away aggressiveness", 0.0, 1.0, 0.0, 0.05, key="away_aggr",
+            "Away aggressiveness", 0.0, 1.0, 0.2, 0.05, key="away_aggr",
             label_visibility="collapsed",
             help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO) "
                  "and skews TD tries toward 2pt (8) / miss (6) vs PAT (7).",
@@ -1032,7 +1032,7 @@ def render_sidebar() -> dict:
             unsafe_allow_html=True,
         )
         home_aggr = st.slider(
-            "Home aggressiveness", 0.0, 1.0, 0.0, 0.05, key="home_aggr",
+            "Home aggressiveness", 0.0, 1.0, 0.2, 0.05, key="home_aggr",
             label_visibility="collapsed",
             help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO) "
                  "and skews TD tries toward 2pt (8) / miss (6) vs PAT (7).",
@@ -1377,8 +1377,8 @@ def render_main(inputs: dict):
     is_shootout            = inputs["is_shootout"]
     ot1_first              = inputs["ot1_first"]
     first_possession_logged = inputs["first_possession_logged"]
-    away_aggr              = inputs.get("away_aggr", 0.0)
-    home_aggr              = inputs.get("home_aggr", 0.0)
+    away_aggr              = inputs.get("away_aggr", 0.2)
+    home_aggr              = inputs.get("home_aggr", 0.2)
 
     # Live situation from sidebar (default to OT start if not set)
     live_down       = inputs.get("down_int", 1)
