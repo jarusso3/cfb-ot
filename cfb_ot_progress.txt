@@ -61,6 +61,46 @@ v0.1 Changelog
 - No scipy, no external data files; only stdlib + streamlit + altair + pandas.
 - Run with: streamlit run cfb_ot_app.py
 
+Fixed — 2026-08-07  (commit d6b217e)
+------------------------------------
+Go-for-2 when the second possessor is down 7 (JA's tweak to the rational-second
+model). Previously a TD that left the second team down 7 FORCED the PAT to tie.
+But going for 2 to win it right there is risky and plausible — and it's a coaching
+choice, not a base rate, so it's driven by that team's aggressiveness slider.
+
+- New GO_FOR_2_DOWN_7_MAX = 0.60. p(go for 2) = 0.60 * aggressiveness, so the 0.2
+  default = 12% go for the win; max slider = 60%. Set the constant to 0.0 to restore
+  the old always-kick behavior (kept as the off switch / regression anchor).
+- Split deficit 7 out of the old shared deficit-6/7 branch in rational_second_probs.
+  The go-for-it slice resolves at TWO_PT_BASE_RATE into 8 (win) / 6 (loss) — i.e.
+  ~45/55, "close to 50/50 as it usually is" per JA. Deficit 6 still ALWAYS kicks,
+  since there the PAT simply wins.
+- Threaded the SECOND possessor's own rating through every consumer so chart and
+  price agree: period_outcome_probs_ordered (new second_aggr param),
+  _p_away_wins_from_period_start, game_win_probs (Cases B and C), game_length_table,
+  and the three render_main call sites. Possession ALTERNATES by period, so each site
+  selects the second team's rating specifically (away slider drives away's decision
+  only) — this is the easy thing to get backwards if this code is touched again.
+- Both aggressiveness slider help strings updated to mention the new effect.
+
+Verified: down-7 PAT share 100%/88%/70%/40% at aggressiveness 0.0/0.2/0.5/1.0;
+deficits 8/6/3/0/-6 and all of OT2+ bit-identical regardless of slider;
+GO_FOR_2_DOWN_7_MAX=0.0 reproduces prior output exactly; Away up 7 moves -220 ->
+-231 as home aggressiveness goes 0 -> 1; AppTest boots clean and TD -> +1 into the
+down-7 state raises no exception.
+
+KNOWN AND INTENDED: at the 0.2 default this is -EV. Trailing team is worth 0.4768
+by tying and playing on vs 0.4500 for the 2pt try (breakeven 2pt rate = 47.7%). The
+knob buys PLAUSIBILITY, not sharpness — cranking it toward 1.0 prices the trailing
+team progressively shorter than a rational model would. Flag for traders.
+
+Fixed — 2026-08-02  (commit f54b110)
+------------------------------------
+Both aggressiveness sliders default to 0.2 instead of 0.0 — teams play more
+aggressively in OT. Settled by playtesting; the trader moves it from there if they
+disagree. NOTE: this means the "aggressiveness ignores down & distance" limitation
+(TODO #1) is no longer opt-in — it's baked into every default price.
+
 Fixed — 2026-07-31  (commit 6a58b3d)
 ------------------------------------
 Round of Kyle's playtest feedback (ran the 2024 Georgia-Georgia Tech game). Three
@@ -186,10 +226,16 @@ TODO — Next Session
    4th-and-15, and late-down situations should influence the FG-vs-TD/TO
    split more than 1st down. Deferred as too complex for now.
 
-2. Aggressiveness — score-aware 2pt decisioning (FUTURE)
-   The 8-vs-6-vs-7 TD split is currently a flat function of the slider. A
-   fuller model would make the go-for-2 choice depend on the score
-   differential (down 8 late → always go for 2, etc.).
+2. Aggressiveness — score-aware 2pt decisioning (PARTIALLY DONE)
+   DONE 2026-08-07: the SECOND possessor's down-7 case is now score-aware — they
+   go for 2 to win at GO_FOR_2_DOWN_7_MAX * aggressiveness instead of always
+   kicking (see the 2026-08-07 entry above). Deficits 8 and 6 were already
+   score-aware (forced 2pt / forced PAT respectively).
+   STILL OPEN: the FIRST possessor plays blind, so their 8-vs-7-vs-6 split is
+   still a flat function of the slider with no score input — which is arguably
+   correct (they have no deficit to respond to), so the real open question is
+   whether the first team's split should instead key off game state (period
+   number, prior OT results) rather than score.
 
 3. OT3+ Moneyline Odds — data upgrade  (PARTIALLY DONE; rest BLOCKED on data)
    DONE 2026-07-21: shootout moneyline now updates mid-period (conditions on the
