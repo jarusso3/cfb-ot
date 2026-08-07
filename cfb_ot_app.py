@@ -50,6 +50,15 @@ OUTCOME_LABELS = {
 # shootout success baseline, so the two rule regimes stay consistent.
 TWO_PT_BASE_RATE = 0.45
 
+# How often the SECOND possessor, having scored a TD that leaves them down 7 (so a
+# PAT ties and forces another OT), instead goes for 2 to win the game outright.
+# This is a coaching decision rather than a base rate, so it's driven by that team's
+# aggressiveness slider: p(go for 2) = GO_FOR_2_DOWN_7_MAX * aggressiveness. At the
+# 0.2 default that's a 12% shot at the win; at max aggressiveness, 60%. Setting this
+# to 0.0 restores the old always-kick-the-PAT behavior. The try itself then resolves
+# at TWO_PT_BASE_RATE — made (8, win) vs failed (6, loss) — i.e. near a coin flip.
+GO_FOR_2_DOWN_7_MAX = 0.60
+
 # Second-possessor edge. The team that possesses SECOND in a given OT has an
 # information advantage (they know exactly what they need). This single knob tilts
 # the second possessor's scoring distribution up on top of any structural edge.
@@ -436,7 +445,8 @@ def _apply_second_edge(probs: dict, edge: float | None = None) -> dict:
     return {k: v / total for k, v in q.items()}
 
 
-def rational_second_probs(base: dict, deficit: int, ot_period: int = 1) -> dict:
+def rational_second_probs(base: dict, deficit: int, ot_period: int = 1,
+                          aggressiveness: float = 0.0) -> dict:
     """
     Re-condition the SECOND possessor's drive distribution on the score they face.
 
@@ -452,9 +462,15 @@ def rational_second_probs(base: dict, deficit: int, ot_period: int = 1) -> dict:
          deficit 3 the FG ties (→ advance) and at deficit ≤ 0 it wins, so it's kept.
       2. Rational TD try (only pre-OT2 — OT2+ base already forces the mandatory 2pt):
            deficit 8 → must convert 2pt to tie: TD mass → td_2pt/td_6 at TWO_PT_BASE_RATE
-           deficit 7 → kick PAT to tie: TD mass → td_pat
+           deficit 7 → PAT ties and extends the game, but going for 2 WINS it now.
+             That's a genuine coaching choice, so it's a mix: a fraction
+             GO_FOR_2_DOWN_7_MAX * aggressiveness go for the win (resolving at
+             TWO_PT_BASE_RATE into 8 = win / 6 = loss), the rest kick the PAT to tie.
            deficit 6 → kick PAT to win: TD mass → td_pat
            deficit 0/3/≤0 → any TD wins or leads, keep the normal split.
+
+    aggressiveness: the SECOND team's own slider (0–1). Only affects the deficit-7
+    branch above — how willing this coach is to end it right there rather than play on.
     """
     q = dict(base)
     td_keys = ("td_pat", "td_2pt", "td_6")
@@ -480,8 +496,16 @@ def rational_second_probs(base: dict, deficit: int, ot_period: int = 1) -> dict:
                 q["td_pat"] = 0.0
                 q["td_2pt"] = td_mass * TWO_PT_BASE_RATE
                 q["td_6"]   = td_mass * (1 - TWO_PT_BASE_RATE)
-            elif deficit in (6, 7):
-                # Kick the PAT (wins when down 6, ties when down 7).
+            elif deficit == 7:
+                # PAT ties (→ advance); a 2pt conversion wins outright. Split the TD
+                # mass by how likely this coach is to take the shot at winning now.
+                a = max(0.0, min(1.0, aggressiveness))
+                p_go = GO_FOR_2_DOWN_7_MAX * a
+                q["td_pat"] = td_mass * (1 - p_go)
+                q["td_2pt"] = td_mass * p_go * TWO_PT_BASE_RATE
+                q["td_6"]   = td_mass * p_go * (1 - TWO_PT_BASE_RATE)
+            elif deficit == 6:
+                # Kick the PAT to win.
                 q["td_pat"] = td_mass
                 q["td_2pt"] = 0.0
                 q["td_6"]   = 0.0
@@ -493,7 +517,8 @@ def rational_second_probs(base: dict, deficit: int, ot_period: int = 1) -> dict:
 def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
                                   first_score: int, second_score: int,
                                   second_edge: bool = True,
-                                  ot_period: int = 1) -> dict:
+                                  ot_period: int = 1,
+                                  second_aggr: float = 0.0) -> dict:
     """
     Enumerate all (first_outcome × second_outcome) combinations for one OT period.
 
@@ -515,6 +540,10 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
     ot_period: passed through to rational_second_probs so the deficit-aware TD split
     respects the OT2+ mandatory-2pt rule.
 
+    second_aggr: the SECOND possessor's aggressiveness — drives how often they go for
+    2 to win when a TD leaves them down 7 (see rational_second_probs). Must be the
+    second team's own rating, not the first team's.
+
     Rational second team: for each first-team outcome we know the exact deficit the
     second team faces, so their distribution is re-conditioned (dominated FGs
     suppressed, TD try chosen for the situation) before enumerating. This is what
@@ -532,7 +561,7 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
 
         # Re-condition the second team on the deficit they now face.
         deficit = f_score_mid - s_score_mid
-        cond_second = rational_second_probs(second_probs, deficit, ot_period)
+        cond_second = rational_second_probs(second_probs, deficit, ot_period, second_aggr)
 
         for sk, sp in cond_second.items():
             # After second team's possession
@@ -558,10 +587,15 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
 
 def _p_away_wins_from_period_start(period: int, ot1_first: str,
                                     away_probs: dict, home_probs: dict,
-                                    p_away_shootout: float) -> float:
+                                    p_away_shootout: float,
+                                    away_aggr: float = 0.0,
+                                    home_aggr: float = 0.0) -> float:
     """
     Recursive helper. Returns P(away wins game) assuming we're at the START of
     `period` with scores tied. OT3+ uses the pre-computed shootout probability.
+
+    away_aggr/home_aggr feed the down-7 go-for-2 decision. Possession ALTERNATES each
+    period, so whichever team possesses second here supplies the relevant rating.
     """
     if period >= 3:
         return p_away_shootout
@@ -569,11 +603,15 @@ def _p_away_wins_from_period_start(period: int, ot1_first: str,
     first_this = first_team_for_period(period, ot1_first)
     fp = away_probs if first_this == "Away" else home_probs
     sp = home_probs if first_this == "Away" else away_probs
+    # The second possessor is the other team — use ITS aggressiveness.
+    second_aggr = home_aggr if first_this == "Away" else away_aggr
 
     # Scores always tied at start of each OT period
-    outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=period)
+    outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=period,
+                                           second_aggr=second_aggr)
     p_future = _p_away_wins_from_period_start(period + 1, ot1_first,
-                                               away_probs, home_probs, p_away_shootout)
+                                               away_probs, home_probs, p_away_shootout,
+                                               away_aggr, home_aggr)
 
     if first_this == "Away":
         return outcome["first_wins"] + outcome["advance"] * p_future
@@ -588,7 +626,9 @@ def game_win_probs(away_probs: dict, home_probs: dict,
                    period_first_pts: int, period_second_pts: int,
                    future_away_probs: dict | None = None,
                    future_home_probs: dict | None = None,
-                   first_shootout_result: str | None = None) -> dict:
+                   first_shootout_result: str | None = None,
+                   away_aggr: float = 0.0,
+                   home_aggr: float = 0.0) -> dict:
     """
     Compute P(away wins game outright) from the current live state.
 
@@ -637,7 +677,8 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         return {"away_wins": p_away, "home_wins": 1 - p_away}
 
     p_future_away = _p_away_wins_from_period_start(
-        current_period + 1, ot1_first, future_away_probs, future_home_probs, p_away_shootout
+        current_period + 1, ot1_first, future_away_probs, future_home_probs, p_away_shootout,
+        away_aggr, home_aggr
     )
 
     first_this = first_team_for_period(current_period, ot1_first)
@@ -646,7 +687,9 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         # ── Case B: start of period, within-period scores both 0 ──
         fp = away_probs if first_this == "Away" else home_probs
         sp = home_probs if first_this == "Away" else away_probs
-        outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=current_period)
+        outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=current_period,
+                                              second_aggr=(home_aggr if first_this == "Away"
+                                                           else away_aggr))
         if first_this == "Away":
             p_away = outcome["first_wins"] + outcome["advance"] * p_future_away
         else:
@@ -664,7 +707,10 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         # trailing team doesn't kick a losing FG.
         second_probs = _apply_second_edge(second_probs)
         deficit = period_first_pts - period_second_pts
-        second_probs = rational_second_probs(second_probs, deficit, current_period)
+        second_probs = rational_second_probs(
+            second_probs, deficit, current_period,
+            away_aggr if second_this == "Away" else home_aggr,
+        )
 
         p_away = 0.0
         for sk, sp_prob in second_probs.items():
@@ -735,11 +781,15 @@ def shootout_period_probs(away_succ: float, home_succ: float,
 def game_length_table(away_probs: dict, home_probs: dict,
                        away_succ: float, home_succ: float,
                        current_period: int, ot1_first: str,
-                       current_period_probs: dict | None = None) -> pd.DataFrame:
+                       current_period_probs: dict | None = None,
+                       away_aggr: float = 0.0,
+                       home_aggr: float = 0.0) -> pd.DataFrame:
     """
     Forward-looking table starting from current_period.
     current_period_probs: if provided, used as-is for the current period row (must have
     away_wins/home_wins/advance keys). Future periods always use base distributions.
+    away_aggr/home_aggr drive the second possessor's down-7 go-for-2 decision; the
+    second possessor alternates by period, so both are passed and selected per row.
     """
     rows = []
     p_live = 1.0
@@ -753,7 +803,9 @@ def game_length_table(away_probs: dict, home_probs: dict,
             first_this = first_team_for_period(period, ot1_first)
             fp = away_probs if first_this == "Away" else home_probs
             sp = home_probs if first_this == "Away" else away_probs
-            raw = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=period)
+            raw = period_outcome_probs_ordered(
+                fp, sp, 0, 0, ot_period=period,
+                second_aggr=(home_aggr if first_this == "Away" else away_aggr))
             outcome = {"away_wins": raw["first_wins"] if first_this == "Away" else raw["second_wins"],
                        "home_wins": raw["second_wins"] if first_this == "Away" else raw["first_wins"],
                        "advance": raw["advance"]}
@@ -1022,8 +1074,10 @@ def render_sidebar() -> dict:
         away_aggr = st.slider(
             "Away aggressiveness", 0.0, 1.0, 0.2, 0.05, key="away_aggr",
             label_visibility="collapsed",
-            help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO) "
-                 "and skews TD tries toward 2pt (8) / miss (6) vs PAT (7).",
+            help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO), "
+                 "skews TD tries toward 2pt (8) / miss (6) vs PAT (7), and — when "
+                 "possessing second and a TD leaves them down 7 — makes them more "
+                 "likely to go for 2 to win outright instead of kicking to tie.",
         )
     with ag2:
         st.markdown(
@@ -1034,8 +1088,10 @@ def render_sidebar() -> dict:
         home_aggr = st.slider(
             "Home aggressiveness", 0.0, 1.0, 0.2, 0.05, key="home_aggr",
             label_visibility="collapsed",
-            help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO) "
-                 "and skews TD tries toward 2pt (8) / miss (6) vs PAT (7).",
+            help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO), "
+                 "skews TD tries toward 2pt (8) / miss (6) vs PAT (7), and — when "
+                 "possessing second and a TD leaves them down 7 — makes them more "
+                 "likely to go for 2 to win outright instead of kicking to tie.",
         )
 
     is_shootout = ot_period >= 3
@@ -1439,10 +1495,10 @@ def render_main(inputs: dict):
                    - st.session_state.get("period_second_pts", 0))
         if inputs["first_this"] == "Away":
             away_probs = collapsed
-            home_probs = rational_second_probs(home_probs, deficit, ot_period)
+            home_probs = rational_second_probs(home_probs, deficit, ot_period, home_aggr)
         else:
             home_probs = collapsed
-            away_probs = rational_second_probs(away_probs, deficit, ot_period)
+            away_probs = rational_second_probs(away_probs, deficit, ot_period, away_aggr)
 
     # TD pending — the ball team has scored a TD but the try (+2/+1/+0) isn't chosen
     # yet. Converge that team's distribution onto the three TD point totals (6/7/8),
@@ -1484,6 +1540,8 @@ def render_main(inputs: dict):
         future_home_probs=home_probs_base,
         first_shootout_result=(st.session_state.first_possession_key
                                if is_shootout and first_possession_logged else None),
+        away_aggr=away_aggr,
+        home_aggr=home_aggr,
     )
     away_win_p = gw["away_wins"]
     home_win_p = gw["home_wins"]
@@ -1638,7 +1696,9 @@ def render_main(inputs: dict):
     else:
         fp = away_probs if first_this == "Away" else home_probs
         sp = home_probs if first_this == "Away" else away_probs
-        raw = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=ot_period)
+        raw = period_outcome_probs_ordered(
+            fp, sp, 0, 0, ot_period=ot_period,
+            second_aggr=(home_aggr if first_this == "Away" else away_aggr))
         period_probs = {
             "away_wins": raw["first_wins"]  if first_this == "Away" else raw["second_wins"],
             "home_wins": raw["second_wins"] if first_this == "Away" else raw["first_wins"],
@@ -1650,6 +1710,8 @@ def render_main(inputs: dict):
         away_probs_base, home_probs_base,
         away_succ, home_succ, ot_period, ot1_first,
         current_period_probs=period_probs,
+        away_aggr=away_aggr,
+        home_aggr=home_aggr,
     )
     # P(reaches this OT) = P(still live entering) for the current period = 1.0,
     # for future periods it's the cumulative advance probability.
