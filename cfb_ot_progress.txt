@@ -61,6 +61,58 @@ v0.1 Changelog
 - No scipy, no external data files; only stdlib + streamlit + altair + pandas.
 - Run with: streamlit run cfb_ot_app.py
 
+Fixed — 2026-08-23  (commit 73f6a52)
+------------------------------------
+Per-team 2-pt conversion rate; the 8-vs-6 split is now pinned to it (JA: the 6 and
+the 8 were "getting really out of whack, especially when aggressiveness is up").
+
+ROOT CAUSE: td_2pt (8) and td_6 (6) are the made and failed halves of the SAME
+event — a 2-pt try — but they were set by two independent ramps in base_drive_probs
+(frac_2pt = 0.08 + 0.25a vs frac_6 = 0.05 + 0.07a). At a=1 that was 33/12, an
+implied 73% conversion rate. Aggressiveness was silently doubling as a
+conversion-SKILL knob on top of being a go-for-it TENDENCY knob.
+
+- TWO_PT_BASE_RATE 0.45 -> 0.48 per JA.
+- New team_two_pt_rate(strength_delta, off_def_tendency) — ONE rate per team. This
+  absorbed the formula that previously lived inline in render_main and fed only the
+  OT3+ shootout, so a team's conversion rate now means the same thing under all
+  three rule regimes (OT1 split, OT2+ mandatory split, OT3+ shootout). Coefficients
+  unchanged (0.10 tendency / 0.05 strength) => 0.33-0.63 at the slider extremes.
+- New _split_two_pt(p, rate) — takes whatever mass sits on the 8/6 pair, keeps the
+  pair's COMBINED total untouched, and re-splits it at the rate. Called LAST in both
+  base_drive_probs and rational_second_probs, so it is the final word on that split
+  regardless of which adjustment routed mass there. No-op on an empty pair (e.g. the
+  deficit-6 TD that kicks the PAT to win).
+- Consequently every branch that routes TD mass now decides only WHETHER they go for
+  two, piling it all on td_2pt and letting the split resolve it. The aggressiveness
+  ramp collapsed to a single frac_2ptry = 0.13 + 0.32a (the try's SHARE of TDs, 13%
+  -> 45%); OT2+ mandatory became just td_2pt += td_pat; likewise deficits 8 and 7.
+- Threaded the rate through period_outcome_probs_ordered (new second_two_pt param),
+  _p_away_wins_from_period_start, game_win_probs (Cases B and C), game_length_table,
+  and the render_main call sites. NOTE: no new top-level plumbing was needed —
+  away_succ/home_succ already flowed to every consumer and ARE the 2-pt rates, so
+  they are simply passed down. Same alternating-possession trap as the 2026-08-07
+  entry: each site must pick the SECOND team's rate specifically.
+- Aggressiveness slider help strings updated — they now say the slider never changes
+  the odds of CONVERTING a try. Also dropped the stale "(UI only — not yet wired to
+  the model)" comment above the sliders, untrue since the 2026-07-12 work.
+
+Verified: 8/(8+6) is exactly 0.4800 in OT1 and OT2 at aggressiveness
+0.0/0.2/0.5/1.0 and across every deficit branch (8/7/6/3/0/-6); 0.63 and 0.33 at
+the slider extremes; distributions still sum to 1. What aggressiveness still moves
+is only how much mass REACHES the pair — in OT1 the 8 runs 3.5% -> 14.5% from a=0
+to a=1 with the 6 tracking alongside instead of diverging. Down-7 go-for-2 channel
+intact: second-possessor period win 0.318 -> 0.410 across the slider, and in a live
+down-7 spot the trailing team's own 2-pt rate moves their game win 0.238 -> 0.384
+across rates 0.33/0.48/0.63.
+
+SIDE EFFECT, worth knowing: this flips the "KNOWN AND INTENDED: -EV" note on the
+2026-08-07 entry below. Breakeven for the down-7 go-for-2 is still 0.4768 (the value
+of tying and playing on), but the try is now worth 0.4800, so going for the win is
+marginally +EV rather than -EV. The knob is no longer buying plausibility at the
+cost of sharpness — it is roughly EV-neutral. Trailing team in that spot: +220 at
+aggressiveness 0.0 -> +218 at 1.0.
+
 Fixed — 2026-08-07  (commit d6b217e)
 ------------------------------------
 Go-for-2 when the second possessor is down 7 (JA's tweak to the rational-second
@@ -240,10 +292,13 @@ TODO — Next Session
 3. OT3+ Moneyline Odds — data upgrade  (PARTIALLY DONE; rest BLOCKED on data)
    DONE 2026-07-21: shootout moneyline now updates mid-period (conditions on the
    first team's logged attempt) and the 2-pt success rate is anchored on the
-   shared TWO_PT_BASE_RATE (0.45) instead of a magic 0.47.
+   shared TWO_PT_BASE_RATE (now 0.48) instead of a magic 0.47.
+   DONE 2026-08-23: that rate is now a real per-team variable, team_two_pt_rate(),
+   shared by the shootout AND the standard-period 8-vs-6 split — so there is now a
+   single hook to feed real numbers into.
    STILL OPEN: swap the flat base rate for actual historical 2-pt conversion
-   rates + team-strength adjustments so the game-length advance rates reflect
-   real data rather than a league constant.
+   rates so the game-length advance rates reflect real data rather than a league
+   constant nudged by sliders. team_two_pt_rate() is the one place to change.
 
 4. Second-possessor edge — calibration follow-up  (OPEN, low priority)
    SECOND_POSSESSOR_EDGE is a flat 0.17 constant. Once the aggressiveness ratings
