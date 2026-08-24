@@ -45,10 +45,11 @@ OUTCOME_LABELS = {
     "def_td":   "Defensive TD (6 pts, defense scores)",
 }
 
-# League-average 2-pt conversion success rate. Single source of truth: drives both
-# the mandatory-2pt TD split in OT2+ (td_2pt made vs td_6 failed) and the OT3+
-# shootout success baseline, so the two rule regimes stay consistent.
-TWO_PT_BASE_RATE = 0.45
+# League-average 2-pt conversion success rate. Single source of truth for EVERY 2-pt
+# try in the model: the OT1 8-vs-6 TD split, the mandatory-2pt TD split in OT2+
+# (td_2pt made vs td_6 failed) and the OT3+ shootout success baseline, so all three
+# rule regimes stay consistent. Per-team rates come from team_two_pt_rate().
+TWO_PT_BASE_RATE = 0.48
 
 # How often the SECOND possessor, having scored a TD that leaves them down 7 (so a
 # PAT ties and forces another OT), instead goes for 2 to win the game outright.
@@ -56,7 +57,7 @@ TWO_PT_BASE_RATE = 0.45
 # aggressiveness slider: p(go for 2) = GO_FOR_2_DOWN_7_MAX * aggressiveness. At the
 # 0.2 default that's a 12% shot at the win; at max aggressiveness, 60%. Setting this
 # to 0.0 restores the old always-kick-the-PAT behavior. The try itself then resolves
-# at TWO_PT_BASE_RATE — made (8, win) vs failed (6, loss) — i.e. near a coin flip.
+# at that team's 2-pt rate — made (8, win) vs failed (6, loss) — i.e. near a coin flip.
 GO_FOR_2_DOWN_7_MAX = 0.60
 
 # Second-possessor edge. The team that possesses SECOND in a given OT has an
@@ -317,9 +318,45 @@ def load_model():
 
 # ── probability engine ─────────────────────────────────────────────────────────
 
+def team_two_pt_rate(strength_delta: float, off_def_tendency: float) -> float:
+    """
+    One team's 2-pt conversion success rate — the single per-team knob behind every
+    2-pt try: the OT1 8-vs-6 split, the OT2+ mandatory-2pt split, and the OT3+
+    shootout. Anchored on TWO_PT_BASE_RATE, nudged by environment and strength.
+
+    Coefficients are deliberately small (0.10 tendency / 0.05 strength): one snap from
+    the 3 is high-variance and near a coin flip, so team quality should move it far
+    less than it moves a full drive. Even at both sliders pinned that's 0.33–0.63,
+    which keeps the 8 and the 6 in the same neighborhood instead of miles apart.
+    """
+    return max(0.1, min(0.9,
+                        TWO_PT_BASE_RATE + off_def_tendency * 0.1 + strength_delta * 0.05))
+
+
+def _split_two_pt(p: dict, two_pt_rate: float) -> dict:
+    """
+    Pin the 8-vs-6 ratio to this team's 2-pt conversion rate. Mutates and returns p.
+
+    td_2pt (8) and td_6 (6) are the made and failed halves of the SAME event — a 2-pt
+    try. So however much TD mass the model has routed onto that pair (which grows with
+    aggressiveness, with the OT2+ mandatory rule, and with rational trailing-team
+    play), the split BETWEEN the two is a conversion rate, not a tendency. This
+    re-splits the pair at two_pt_rate and leaves the pair's COMBINED mass — and every
+    other outcome — untouched. No-op when the pair is empty (e.g. a deficit-6 TD that
+    kicks the PAT to win) or already sitting at the rate.
+    """
+    two_pt_mass = p["td_2pt"] + p["td_6"]
+    if two_pt_mass <= 0:
+        return p
+    p["td_2pt"] = two_pt_mass * two_pt_rate
+    p["td_6"]   = two_pt_mass * (1 - two_pt_rate)
+    return p
+
+
 def base_drive_probs(strength_delta: float, off_def_tendency: float,
                      down: int = 1, distance: int = 10, yards_to_goal: int = 25,
-                     aggressiveness: float = 0.0, ot_period: int = 1) -> dict:
+                     aggressiveness: float = 0.0, ot_period: int = 1,
+                     two_pt_rate: float | None = None) -> dict:
     """
     Returns a drive outcome probability distribution using the trained ML model
     as the base, then applies strength and tendency adjustments on top.
@@ -329,14 +366,18 @@ def base_drive_probs(strength_delta: float, off_def_tendency: float,
     down/distance/yards_to_goal → field situation (defaults to OT start)
     aggressiveness   0 → normal play (no effect); 1 → fairly extreme. Suppresses
                      FG (going for it instead of kicking), pushing that mass into
-                     TD and turnover, and shifts the TD point-split from PAT (7)
-                     toward 2pt (8) and missed-PAT (6). Meant for the ACTIVE drive
-                     only — leave at 0 for base/future distributions.
+                     TD and turnover, and shifts TD mass off the PAT (7) onto the
+                     2-pt try. It moves HOW OFTEN they go for 2, never the odds of
+                     converting it — the 8-vs-6 split stays at two_pt_rate. Meant for
+                     the ACTIVE drive only — leave at 0 for base/future distributions.
     ot_period        the OT period this drive belongs to. NCAA mandates a 2-pt try
                      after any TD starting in OT2, so for ot_period >= 2 the 7-pt
-                     PAT outcome is impossible: its mass collapses onto td_2pt
-                     (made, 8) and td_6 (failed, 6) at TWO_PT_BASE_RATE.
+                     PAT outcome is impossible: all TD mass lands on the 2-pt pair.
+    two_pt_rate      this team's 2-pt conversion rate — the final word on how the
+                     2-pt-try mass divides between td_2pt (made, 8) and td_6 (failed,
+                     6). Defaults to TWO_PT_BASE_RATE.
     """
+    rate = TWO_PT_BASE_RATE if two_pt_rate is None else two_pt_rate
     payload = load_model()
     model   = payload["model"]
     classes = payload["classes"]   # e.g. ["fg", "td_pat", "turnover"]
@@ -400,27 +441,27 @@ def base_drive_probs(strength_delta: float, off_def_tendency: float,
             p["td_pat"] += fg_removed * 0.60
         p["turnover"] += fg_removed * 0.40
 
-        # 2) Shift the TD point-split away from PAT (7) toward 2pt (8) and miss (6).
-        #    Reweight the TD mass onto new fractions that ramp with a. Normal split
-        #    is 87/8/5 (pat/2pt/6); at a=1 it moves toward ~55/33/12.
+        # 2) Shift TD mass off the PAT (7) and onto a 2-pt try. This sets only how
+        #    OFTEN they go for 2 — the try's share of TDs ramps from 13% at a=0 to
+        #    ~45% at a=1 — while _split_two_pt below decides made (8) vs failed (6).
         td_mass = sum(p[k] for k in td_keys)
         if td_mass > 0:
-            frac_pat = 0.87 - 0.32 * a
-            frac_2pt = 0.08 + 0.25 * a
-            frac_6   = 0.05 + 0.07 * a
-            s = frac_pat + frac_2pt + frac_6
-            p["td_pat"] = td_mass * frac_pat / s
-            p["td_2pt"] = td_mass * frac_2pt / s
-            p["td_6"]   = td_mass * frac_6   / s
+            frac_pat   = 0.87 - 0.32 * a
+            frac_2ptry = 0.13 + 0.32 * a
+            s = frac_pat + frac_2ptry
+            p["td_pat"] = td_mass * frac_pat   / s
+            p["td_2pt"] = td_mass * frac_2ptry / s
+            p["td_6"]   = 0.0
 
-    # Mandatory 2-pt try in OT2+: the 7-pt PAT is not allowed. Collapse all TD mass
-    # onto the two 2-pt outcomes — made (td_2pt, 8) vs failed (td_6, 6) — at the
-    # league 2-pt conversion rate. Runs last so it's the final word on the TD split.
+    # Mandatory 2-pt try in OT2+: the 7-pt PAT is not allowed, so all TD mass becomes
+    # 2-pt-try mass. _split_two_pt then resolves it into made (8) vs failed (6).
     if ot_period >= 2:
-        td_mass = p["td_pat"] + p["td_2pt"] + p["td_6"]
-        p["td_pat"] = 0.0
-        p["td_2pt"] = td_mass * TWO_PT_BASE_RATE
-        p["td_6"]   = td_mass * (1 - TWO_PT_BASE_RATE)
+        p["td_2pt"] += p["td_pat"]
+        p["td_pat"]  = 0.0
+
+    # Pin the 8-vs-6 ratio to this team's conversion rate. Runs last so it's the final
+    # word on that split no matter which adjustment above routed mass onto the pair.
+    _split_two_pt(p, rate)
 
     total = sum(p.values())
     return {k: v / total for k, v in p.items()}
@@ -446,7 +487,8 @@ def _apply_second_edge(probs: dict, edge: float | None = None) -> dict:
 
 
 def rational_second_probs(base: dict, deficit: int, ot_period: int = 1,
-                          aggressiveness: float = 0.0) -> dict:
+                          aggressiveness: float = 0.0,
+                          two_pt_rate: float | None = None) -> dict:
     """
     Re-condition the SECOND possessor's drive distribution on the score they face.
 
@@ -460,18 +502,24 @@ def rational_second_probs(base: dict, deficit: int, ot_period: int = 1,
          that FG mass and model going for it on 4th down instead: 40% converts (to a
          TD, spread across the existing TD split) and 60% fails (turnover). At
          deficit 3 the FG ties (→ advance) and at deficit ≤ 0 it wins, so it's kept.
-      2. Rational TD try (only pre-OT2 — OT2+ base already forces the mandatory 2pt):
-           deficit 8 → must convert 2pt to tie: TD mass → td_2pt/td_6 at TWO_PT_BASE_RATE
+      2. Rational TD try (only pre-OT2 — OT2+ base already forces the mandatory 2pt).
+         Each branch decides only WHETHER they go for 2; two_pt_rate then splits any
+         2-pt-try mass into made (8) vs failed (6):
+           deficit 8 → must convert a 2pt to tie: all TD mass → 2-pt try
            deficit 7 → PAT ties and extends the game, but going for 2 WINS it now.
              That's a genuine coaching choice, so it's a mix: a fraction
-             GO_FOR_2_DOWN_7_MAX * aggressiveness go for the win (resolving at
-             TWO_PT_BASE_RATE into 8 = win / 6 = loss), the rest kick the PAT to tie.
+             GO_FOR_2_DOWN_7_MAX * aggressiveness go for the win (8 = win / 6 = loss),
+             the rest kick the PAT to tie.
            deficit 6 → kick PAT to win: TD mass → td_pat
            deficit 0/3/≤0 → any TD wins or leads, keep the normal split.
 
     aggressiveness: the SECOND team's own slider (0–1). Only affects the deficit-7
     branch above — how willing this coach is to end it right there rather than play on.
+
+    two_pt_rate: the SECOND team's own 2-pt conversion rate. Defaults to
+    TWO_PT_BASE_RATE.
     """
+    rate = TWO_PT_BASE_RATE if two_pt_rate is None else two_pt_rate
     q = dict(base)
     td_keys = ("td_pat", "td_2pt", "td_6")
 
@@ -493,22 +541,26 @@ def rational_second_probs(base: dict, deficit: int, ot_period: int = 1,
         td_mass = sum(q[k] for k in td_keys)
         if td_mass > 0:
             if deficit == 8:
+                # Only a 2-pt conversion ties it — every TD goes for two.
                 q["td_pat"] = 0.0
-                q["td_2pt"] = td_mass * TWO_PT_BASE_RATE
-                q["td_6"]   = td_mass * (1 - TWO_PT_BASE_RATE)
+                q["td_2pt"] = td_mass
+                q["td_6"]   = 0.0
             elif deficit == 7:
                 # PAT ties (→ advance); a 2pt conversion wins outright. Split the TD
                 # mass by how likely this coach is to take the shot at winning now.
                 a = max(0.0, min(1.0, aggressiveness))
                 p_go = GO_FOR_2_DOWN_7_MAX * a
                 q["td_pat"] = td_mass * (1 - p_go)
-                q["td_2pt"] = td_mass * p_go * TWO_PT_BASE_RATE
-                q["td_6"]   = td_mass * p_go * (1 - TWO_PT_BASE_RATE)
+                q["td_2pt"] = td_mass * p_go
+                q["td_6"]   = 0.0
             elif deficit == 6:
                 # Kick the PAT to win.
                 q["td_pat"] = td_mass
                 q["td_2pt"] = 0.0
                 q["td_6"]   = 0.0
+
+    # 3) Resolve any 2-pt-try mass into made (8) vs failed (6) at this team's rate.
+    _split_two_pt(q, rate)
 
     total = sum(q.values())
     return {k: v / total for k, v in q.items()}
@@ -518,7 +570,8 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
                                   first_score: int, second_score: int,
                                   second_edge: bool = True,
                                   ot_period: int = 1,
-                                  second_aggr: float = 0.0) -> dict:
+                                  second_aggr: float = 0.0,
+                                  second_two_pt: float | None = None) -> dict:
     """
     Enumerate all (first_outcome × second_outcome) combinations for one OT period.
 
@@ -544,6 +597,9 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
     2 to win when a TD leaves them down 7 (see rational_second_probs). Must be the
     second team's own rating, not the first team's.
 
+    second_two_pt: the SECOND possessor's own 2-pt conversion rate, used to resolve any
+    2-pt try their re-conditioned distribution takes on.
+
     Rational second team: for each first-team outcome we know the exact deficit the
     second team faces, so their distribution is re-conditioned (dominated FGs
     suppressed, TD try chosen for the situation) before enumerating. This is what
@@ -561,7 +617,8 @@ def period_outcome_probs_ordered(first_probs: dict, second_probs: dict,
 
         # Re-condition the second team on the deficit they now face.
         deficit = f_score_mid - s_score_mid
-        cond_second = rational_second_probs(second_probs, deficit, ot_period, second_aggr)
+        cond_second = rational_second_probs(second_probs, deficit, ot_period,
+                                            second_aggr, second_two_pt)
 
         for sk, sp in cond_second.items():
             # After second team's possession
@@ -589,13 +646,16 @@ def _p_away_wins_from_period_start(period: int, ot1_first: str,
                                     away_probs: dict, home_probs: dict,
                                     p_away_shootout: float,
                                     away_aggr: float = 0.0,
-                                    home_aggr: float = 0.0) -> float:
+                                    home_aggr: float = 0.0,
+                                    away_two_pt: float | None = None,
+                                    home_two_pt: float | None = None) -> float:
     """
     Recursive helper. Returns P(away wins game) assuming we're at the START of
     `period` with scores tied. OT3+ uses the pre-computed shootout probability.
 
-    away_aggr/home_aggr feed the down-7 go-for-2 decision. Possession ALTERNATES each
-    period, so whichever team possesses second here supplies the relevant rating.
+    away_aggr/home_aggr feed the down-7 go-for-2 decision, and away_two_pt/home_two_pt
+    the 8-vs-6 split. Possession ALTERNATES each period, so whichever team possesses
+    second here supplies the relevant ratings.
     """
     if period >= 3:
         return p_away_shootout
@@ -603,15 +663,18 @@ def _p_away_wins_from_period_start(period: int, ot1_first: str,
     first_this = first_team_for_period(period, ot1_first)
     fp = away_probs if first_this == "Away" else home_probs
     sp = home_probs if first_this == "Away" else away_probs
-    # The second possessor is the other team — use ITS aggressiveness.
-    second_aggr = home_aggr if first_this == "Away" else away_aggr
+    # The second possessor is the other team — use ITS aggressiveness and 2-pt rate.
+    second_aggr   = home_aggr   if first_this == "Away" else away_aggr
+    second_two_pt = home_two_pt if first_this == "Away" else away_two_pt
 
     # Scores always tied at start of each OT period
     outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=period,
-                                           second_aggr=second_aggr)
+                                           second_aggr=second_aggr,
+                                           second_two_pt=second_two_pt)
     p_future = _p_away_wins_from_period_start(period + 1, ot1_first,
                                                away_probs, home_probs, p_away_shootout,
-                                               away_aggr, home_aggr)
+                                               away_aggr, home_aggr,
+                                               away_two_pt, home_two_pt)
 
     if first_this == "Away":
         return outcome["first_wins"] + outcome["advance"] * p_future
@@ -641,6 +704,10 @@ def game_win_probs(away_probs: dict, home_probs: dict,
     distributions — never the live/collapsed ones, or every hypothetical future
     period would inherit the current period's known result. Defaults to the current
     dists for backward compatibility.
+
+    away_succ / home_succ are each team's 2-pt conversion rate (team_two_pt_rate). They
+    price the OT3+ shootout AND set the 8-vs-6 split on every standard-period TD, so a
+    team's conversion rate means one thing across both rule regimes.
 
     Three cases:
       A. Shootout period (OT3+): closed-form.
@@ -678,7 +745,7 @@ def game_win_probs(away_probs: dict, home_probs: dict,
 
     p_future_away = _p_away_wins_from_period_start(
         current_period + 1, ot1_first, future_away_probs, future_home_probs, p_away_shootout,
-        away_aggr, home_aggr
+        away_aggr, home_aggr, away_succ, home_succ
     )
 
     first_this = first_team_for_period(current_period, ot1_first)
@@ -689,7 +756,9 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         sp = home_probs if first_this == "Away" else away_probs
         outcome = period_outcome_probs_ordered(fp, sp, 0, 0, ot_period=current_period,
                                               second_aggr=(home_aggr if first_this == "Away"
-                                                           else away_aggr))
+                                                           else away_aggr),
+                                              second_two_pt=(home_succ if first_this == "Away"
+                                                             else away_succ))
         if first_this == "Away":
             p_away = outcome["first_wins"] + outcome["advance"] * p_future_away
         else:
@@ -710,6 +779,7 @@ def game_win_probs(away_probs: dict, home_probs: dict,
         second_probs = rational_second_probs(
             second_probs, deficit, current_period,
             away_aggr if second_this == "Away" else home_aggr,
+            away_succ if second_this == "Away" else home_succ,
         )
 
         p_away = 0.0
@@ -788,8 +858,9 @@ def game_length_table(away_probs: dict, home_probs: dict,
     Forward-looking table starting from current_period.
     current_period_probs: if provided, used as-is for the current period row (must have
     away_wins/home_wins/advance keys). Future periods always use base distributions.
-    away_aggr/home_aggr drive the second possessor's down-7 go-for-2 decision; the
-    second possessor alternates by period, so both are passed and selected per row.
+    away_aggr/home_aggr drive the second possessor's down-7 go-for-2 decision, and
+    away_succ/home_succ their 8-vs-6 split; the second possessor alternates by period,
+    so both sides are passed and selected per row.
     """
     rows = []
     p_live = 1.0
@@ -805,7 +876,8 @@ def game_length_table(away_probs: dict, home_probs: dict,
             sp = home_probs if first_this == "Away" else away_probs
             raw = period_outcome_probs_ordered(
                 fp, sp, 0, 0, ot_period=period,
-                second_aggr=(home_aggr if first_this == "Away" else away_aggr))
+                second_aggr=(home_aggr if first_this == "Away" else away_aggr),
+                second_two_pt=(home_succ if first_this == "Away" else away_succ))
             outcome = {"away_wins": raw["first_wins"] if first_this == "Away" else raw["second_wins"],
                        "home_wins": raw["second_wins"] if first_this == "Away" else raw["first_wins"],
                        "advance": raw["advance"]}
@@ -1048,7 +1120,7 @@ def render_sidebar() -> dict:
         tend_label = "Neutral"
     st.sidebar.caption(f"Environment: **{tend_label}**")
 
-    # ── Team aggressiveness (UI only — not yet wired to the model) ──
+    # ── Team aggressiveness ──
     away_bg = team_color(away_team)
     home_bg = team_color(home_team)
     # Color each aggressiveness slider's thumb to its team. These are the only
@@ -1075,9 +1147,11 @@ def render_sidebar() -> dict:
             "Away aggressiveness", 0.0, 1.0, 0.2, 0.05, key="away_aggr",
             label_visibility="collapsed",
             help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO), "
-                 "skews TD tries toward 2pt (8) / miss (6) vs PAT (7), and — when "
-                 "possessing second and a TD leaves them down 7 — makes them more "
-                 "likely to go for 2 to win outright instead of kicking to tie.",
+                 "goes for 2 after a TD more often instead of kicking the PAT, and — "
+                 "when possessing second and a TD leaves them down 7 — makes them more "
+                 "likely to go for 2 to win outright instead of kicking to tie. It never "
+                 "changes the odds of CONVERTING a 2-pt try; that's the team's 2-pt rate, "
+                 "so the 8 and the 6 stay near a coin flip.",
         )
     with ag2:
         st.markdown(
@@ -1089,9 +1163,11 @@ def render_sidebar() -> dict:
             "Home aggressiveness", 0.0, 1.0, 0.2, 0.05, key="home_aggr",
             label_visibility="collapsed",
             help="0 = normal play. Higher = suppresses FG (goes for it → more TD/TO), "
-                 "skews TD tries toward 2pt (8) / miss (6) vs PAT (7), and — when "
-                 "possessing second and a TD leaves them down 7 — makes them more "
-                 "likely to go for 2 to win outright instead of kicking to tie.",
+                 "goes for 2 after a TD more often instead of kicking the PAT, and — "
+                 "when possessing second and a TD leaves them down 7 — makes them more "
+                 "likely to go for 2 to win outright instead of kicking to tie. It never "
+                 "changes the odds of CONVERTING a 2-pt try; that's the team's 2-pt rate, "
+                 "so the 8 and the 6 stay near a coin flip.",
         )
 
     is_shootout = ot_period >= 3
@@ -1441,21 +1517,22 @@ def render_main(inputs: dict):
     live_distance   = inputs.get("distance_int", 10)
     live_ytg        = inputs.get("field_position", 25) if inputs.get("field_position") else 25
 
+    # Per-team 2-pt conversion rates. One variable per team, used everywhere a 2-pt try
+    # is priced: the OT1 8-vs-6 TD split, the OT2+ mandatory-2pt split, and the OT3+
+    # shootout. Computed before the distributions because they feed into them.
+    away_succ = team_two_pt_rate( strength_delta, off_def_tendency)
+    home_succ = team_two_pt_rate(-strength_delta, off_def_tendency)
+
     # Base distributions — OT start defaults (1st & 10 from 25).
     # Used ONLY for forward-looking math (future periods in the game-win recursion
     # and the game-length table) — never the current period. The only future
     # STANDARD period is OT2 (period 3+ is always the shootout, which ignores these),
     # and OT2 mandates a 2-pt try, so build these at ot_period=2 so the mandatory-2pt
     # TD split is baked into every future standard period.
-    away_probs_base = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25, ot_period=2)
-    home_probs_base = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, ot_period=2)
-    # Shootout 2-pt success rates — anchored on the same league base as the
-    # mandatory-2pt TD split (TWO_PT_BASE_RATE), then nudged by tendency/strength.
-    # Strength coefficient is deliberately small (0.05): a single 2-pt play is
-    # high-variance and near coin-flip, so team strength should move the OT3+
-    # shootout ML far less than it moves a full-drive OT (Kyle: GT +162 was too long).
-    away_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 + strength_delta * 0.05))
-    home_succ  = max(0.1, min(0.9, TWO_PT_BASE_RATE + off_def_tendency * 0.1 - strength_delta * 0.05))
+    away_probs_base = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25,
+                                       ot_period=2, two_pt_rate=away_succ)
+    home_probs_base = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25,
+                                       ot_period=2, two_pt_rate=home_succ)
 
     # Live distributions — both teams' CURRENT-period drives. Each team always
     # carries its OWN aggressiveness (it's a team property for this period, and both
@@ -1473,11 +1550,11 @@ def render_main(inputs: dict):
             ball_side = "Home" if first_this_live == "Away" else "Away"
 
         if ball_side == "Away":
-            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr, ot_period=ot_period)
-            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, home_aggr, ot_period=ot_period)
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, live_down, live_distance, live_ytg, away_aggr, ot_period=ot_period, two_pt_rate=away_succ)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, 1, 10, 25, home_aggr, ot_period=ot_period, two_pt_rate=home_succ)
         else:
-            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25, away_aggr, ot_period=ot_period)
-            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr, ot_period=ot_period)
+            away_probs_live = base_drive_probs( strength_delta, off_def_tendency, 1, 10, 25, away_aggr, ot_period=ot_period, two_pt_rate=away_succ)
+            home_probs_live = base_drive_probs(-strength_delta, off_def_tendency, live_down, live_distance, live_ytg, home_aggr, ot_period=ot_period, two_pt_rate=home_succ)
     else:
         away_probs_live = dict(away_probs_base)
         home_probs_live = dict(home_probs_base)
@@ -1495,10 +1572,10 @@ def render_main(inputs: dict):
                    - st.session_state.get("period_second_pts", 0))
         if inputs["first_this"] == "Away":
             away_probs = collapsed
-            home_probs = rational_second_probs(home_probs, deficit, ot_period, home_aggr)
+            home_probs = rational_second_probs(home_probs, deficit, ot_period, home_aggr, home_succ)
         else:
             home_probs = collapsed
-            away_probs = rational_second_probs(away_probs, deficit, ot_period, away_aggr)
+            away_probs = rational_second_probs(away_probs, deficit, ot_period, away_aggr, away_succ)
 
     # TD pending — the ball team has scored a TD but the try (+2/+1/+0) isn't chosen
     # yet. Converge that team's distribution onto the three TD point totals (6/7/8),
@@ -1698,7 +1775,8 @@ def render_main(inputs: dict):
         sp = home_probs if first_this == "Away" else away_probs
         raw = period_outcome_probs_ordered(
             fp, sp, 0, 0, ot_period=ot_period,
-            second_aggr=(home_aggr if first_this == "Away" else away_aggr))
+            second_aggr=(home_aggr if first_this == "Away" else away_aggr),
+            second_two_pt=(home_succ if first_this == "Away" else away_succ))
         period_probs = {
             "away_wins": raw["first_wins"]  if first_this == "Away" else raw["second_wins"],
             "home_wins": raw["second_wins"] if first_this == "Away" else raw["first_wins"],
